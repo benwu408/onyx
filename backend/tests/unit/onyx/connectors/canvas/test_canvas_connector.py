@@ -819,6 +819,15 @@ class TestListPages:
         assert result[0].page_id == 10
         assert result[1].page_id == 11
 
+    @patch("onyx.connectors.canvas.client.rl_requests")
+    def test_empty_response(self, mock_requests: MagicMock) -> None:
+        mock_requests.get.return_value = _mock_response(json_data=[])
+        connector = _build_connector()
+
+        result = connector._list_pages(course_id=1)
+
+        assert result == []
+
 
 class TestListAssignments:
     @patch("onyx.connectors.canvas.client.rl_requests")
@@ -855,6 +864,15 @@ class TestListAssignments:
         assert result[0].id == 20
         assert result[1].id == 21
 
+    @patch("onyx.connectors.canvas.client.rl_requests")
+    def test_empty_response(self, mock_requests: MagicMock) -> None:
+        mock_requests.get.return_value = _mock_response(json_data=[])
+        connector = _build_connector()
+
+        result = connector._list_assignments(course_id=1)
+
+        assert result == []
+
 
 class TestListAnnouncements:
     @patch("onyx.connectors.canvas.client.rl_requests")
@@ -890,3 +908,12 @@ class TestListAnnouncements:
         assert len(result) == 2
         assert result[0].id == 30
         assert result[1].id == 31
+
+    @patch("onyx.connectors.canvas.client.rl_requests")
+    def test_empty_response(self, mock_requests: MagicMock) -> None:
+        mock_requests.get.return_value = _mock_response(json_data=[])
+        connector = _build_connector()
+
+        result = connector._list_announcements(course_id=1)
+
+        assert result == []
