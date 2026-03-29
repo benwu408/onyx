@@ -511,7 +511,7 @@ def add_credential_to_connector(
     user: User,
     connector_id: int,
     credential_id: int,
-    cc_pair_name: str | None,
+    cc_pair_name: str,
     access_type: AccessType,
     groups: list[int] | None,
     auto_sync_options: dict | None = None,
@@ -750,3 +750,31 @@ def resync_cc_pair(
     )
 
     db_session.commit()
+
+
+# ── Metrics query helpers ──────────────────────────────────────────────
+
+
+def get_connector_health_for_metrics(
+    db_session: Session,
+) -> list:  # Returns list of Row tuples
+    """Return connector health data for Prometheus metrics.
+
+    Each row is (cc_pair_id, status, in_repeated_error_state,
+    last_successful_index_time, name, source).
+    """
+    return (
+        db_session.query(
+            ConnectorCredentialPair.id,
+            ConnectorCredentialPair.status,
+            ConnectorCredentialPair.in_repeated_error_state,
+            ConnectorCredentialPair.last_successful_index_time,
+            ConnectorCredentialPair.name,
+            Connector.source,
+        )
+        .join(
+            Connector,
+            ConnectorCredentialPair.connector_id == Connector.id,
+        )
+        .all()
+    )

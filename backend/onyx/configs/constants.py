@@ -177,6 +177,14 @@ USER_FILE_PROJECT_SYNC_MAX_QUEUE_DEPTH = 500
 
 CELERY_USER_FILE_PROJECT_SYNC_LOCK_TIMEOUT = 5 * 60  # 5 minutes (in seconds)
 
+# How long a queued user-file-delete task is valid before workers discard it.
+# Mirrors the processing task expiry to prevent indefinite queue growth when
+# files are stuck in DELETING status and the beat keeps re-enqueuing them.
+CELERY_USER_FILE_DELETE_TASK_EXPIRES = 60  # 1 minute (in seconds)
+
+# Max queue depth before the delete beat stops enqueuing more delete tasks.
+USER_FILE_DELETE_MAX_QUEUE_DEPTH = 500
+
 CELERY_SANDBOX_FILE_SYNC_LOCK_TIMEOUT = 5 * 60  # 5 minutes (in seconds)
 
 DANSWER_REDIS_FUNCTION_LOCK_PREFIX = "da_function_lock:"
@@ -204,6 +212,7 @@ class DocumentSource(str, Enum):
     PRODUCTBOARD = "productboard"
     FILE = "file"
     CODA = "coda"
+    CANVAS = "canvas"
     NOTION = "notion"
     ZULIP = "zulip"
     LINEAR = "linear"
@@ -469,6 +478,9 @@ class OnyxRedisLocks:
     USER_FILE_PROJECT_SYNC_QUEUED_PREFIX = "da_lock:user_file_project_sync_queued"
     USER_FILE_DELETE_BEAT_LOCK = "da_lock:check_user_file_delete_beat"
     USER_FILE_DELETE_LOCK_PREFIX = "da_lock:user_file_delete"
+    # Short-lived key set when a delete task is enqueued; cleared when the worker picks it up.
+    # Prevents the beat from re-enqueuing the same file while a delete task is already queued.
+    USER_FILE_DELETE_QUEUED_PREFIX = "da_lock:user_file_delete_queued"
 
     # Release notes
     RELEASE_NOTES_FETCH_LOCK = "da_lock:release_notes_fetch"
@@ -597,6 +609,9 @@ class OnyxCeleryTask:
     EXPORT_QUERY_HISTORY_TASK = "export_query_history_task"
     EXPORT_QUERY_HISTORY_CLEANUP_TASK = "export_query_history_cleanup_task"
 
+    # Hook execution log retention
+    HOOK_EXECUTION_LOG_CLEANUP_TASK = "hook_execution_log_cleanup_task"
+
     # Sandbox cleanup
     CLEANUP_IDLE_SANDBOXES = "cleanup_idle_sandboxes"
     CLEANUP_OLD_SNAPSHOTS = "cleanup_old_snapshots"
@@ -658,6 +673,7 @@ DocumentSourceDescription: dict[DocumentSource, str] = {
     DocumentSource.SLAB: "slab data",
     DocumentSource.PRODUCTBOARD: "productboard data (boards, etc.)",
     DocumentSource.FILE: "files",
+    DocumentSource.CANVAS: "canvas lms - courses, pages, assignments, and announcements",
     DocumentSource.CODA: "coda - team workspace with docs, tables, and pages",
     DocumentSource.NOTION: "notion data - a workspace that combines note-taking, \
 project management, and collaboration tools into a single, customizable platform",

@@ -7,7 +7,7 @@ import {
   SourceMetadata,
 } from "@/lib/search/interfaces";
 import SearchCard from "@/ee/sections/SearchCard";
-import Pagination from "@/refresh-components/Pagination";
+import { Pagination } from "@opal/components";
 import Separator from "@/refresh-components/Separator";
 import EmptyMessage from "@/refresh-components/EmptyMessage";
 import { IllustrationContent } from "@opal/layouts";
@@ -21,7 +21,7 @@ import Text from "@/refresh-components/texts/Text";
 import { Section } from "@/layouts/general-layouts";
 import Popover, { PopoverMenu } from "@/refresh-components/Popover";
 import { SvgCheck, SvgClock, SvgTag } from "@opal/icons";
-import FilterButton from "@/refresh-components/buttons/FilterButton";
+import { FilterButton } from "@opal/components";
 import InputTypeIn from "@/refresh-components/inputs/InputTypeIn";
 import useFilter from "@/hooks/useFilter";
 import { LineItemButton } from "@opal/components";
@@ -217,7 +217,7 @@ export default function SearchUI({ onDocumentClick }: SearchResultsProps) {
             <Popover open={timeFilterOpen} onOpenChange={setTimeFilterOpen}>
               <Popover.Trigger asChild>
                 <FilterButton
-                  leftIcon={SvgClock}
+                  icon={SvgClock}
                   active={!!timeFilter}
                   onClear={() => {
                     setTimeFilter(null);
@@ -253,7 +253,7 @@ export default function SearchUI({ onDocumentClick }: SearchResultsProps) {
             <Popover open={tagFilterOpen} onOpenChange={setTagFilterOpen}>
               <Popover.Trigger asChild>
                 <FilterButton
-                  leftIcon={SvgTag}
+                  icon={SvgTag}
                   active={selectedTags.length > 0}
                   onClear={() => {
                     setSelectedTags([]);
@@ -391,11 +391,13 @@ export default function SearchUI({ onDocumentClick }: SearchResultsProps) {
 
       {/* ── Bottom row: Pagination ── */}
       {!showEmpty && (
-        <Pagination
-          currentPage={currentPage}
-          totalPages={totalPages}
-          onPageChange={setCurrentPage}
-        />
+        <Section height="fit">
+          <Pagination
+            currentPage={currentPage}
+            totalPages={totalPages}
+            onChange={setCurrentPage}
+          />
+        </Section>
       )}
     </div>
   );

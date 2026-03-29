@@ -43,10 +43,12 @@ from onyx.document_index.opensearch.client import OpenSearchClient
 from onyx.document_index.opensearch.client import OpenSearchIndexClient
 from onyx.document_index.opensearch.client import SearchHit
 from onyx.document_index.opensearch.cluster_settings import OPENSEARCH_CLUSTER_SETTINGS
+from onyx.document_index.opensearch.constants import OpenSearchSearchType
 from onyx.document_index.opensearch.schema import ACCESS_CONTROL_LIST_FIELD_NAME
 from onyx.document_index.opensearch.schema import CONTENT_FIELD_NAME
 from onyx.document_index.opensearch.schema import DOCUMENT_SETS_FIELD_NAME
 from onyx.document_index.opensearch.schema import DocumentChunk
+from onyx.document_index.opensearch.schema import DocumentChunkWithoutVectors
 from onyx.document_index.opensearch.schema import DocumentSchema
 from onyx.document_index.opensearch.schema import get_opensearch_doc_chunk_id
 from onyx.document_index.opensearch.schema import GLOBAL_BOOST_FIELD_NAME
@@ -55,16 +57,13 @@ from onyx.document_index.opensearch.schema import PERSONAS_FIELD_NAME
 from onyx.document_index.opensearch.schema import USER_PROJECTS_FIELD_NAME
 from onyx.document_index.opensearch.search import DocumentQuery
 from onyx.document_index.opensearch.search import (
-    MIN_MAX_NORMALIZATION_PIPELINE_CONFIG,
+    get_min_max_normalization_pipeline_name_and_config,
 )
 from onyx.document_index.opensearch.search import (
-    MIN_MAX_NORMALIZATION_PIPELINE_NAME,
+    get_normalization_pipeline_name_and_config,
 )
 from onyx.document_index.opensearch.search import (
-    ZSCORE_NORMALIZATION_PIPELINE_CONFIG,
-)
-from onyx.document_index.opensearch.search import (
-    ZSCORE_NORMALIZATION_PIPELINE_NAME,
+    get_zscore_normalization_pipeline_name_and_config,
 )
 from onyx.indexing.models import DocMetadataAwareIndexChunk
 from onyx.indexing.models import Document
@@ -103,18 +102,24 @@ def set_cluster_state(client: OpenSearchClient) -> None:
             "is not the first time running Onyx against this instance of OpenSearch, these "
             "settings have likely already been set. Not taking any further action..."
         )
-    client.create_search_pipeline(
-        pipeline_id=MIN_MAX_NORMALIZATION_PIPELINE_NAME,
-        pipeline_body=MIN_MAX_NORMALIZATION_PIPELINE_CONFIG,
+    min_max_normalization_pipeline_name, min_max_normalization_pipeline_config = (
+        get_min_max_normalization_pipeline_name_and_config()
+    )
+    zscore_normalization_pipeline_name, zscore_normalization_pipeline_config = (
+        get_zscore_normalization_pipeline_name_and_config()
     )
     client.create_search_pipeline(
-        pipeline_id=ZSCORE_NORMALIZATION_PIPELINE_NAME,
-        pipeline_body=ZSCORE_NORMALIZATION_PIPELINE_CONFIG,
+        pipeline_id=min_max_normalization_pipeline_name,
+        pipeline_body=min_max_normalization_pipeline_config,
+    )
+    client.create_search_pipeline(
+        pipeline_id=zscore_normalization_pipeline_name,
+        pipeline_body=zscore_normalization_pipeline_config,
     )
 
 
 def _convert_retrieved_opensearch_chunk_to_inference_chunk_uncleaned(
-    chunk: DocumentChunk,
+    chunk: DocumentChunkWithoutVectors,
     score: float | None,
     highlights: dict[str, list[str]],
 ) -> InferenceChunkUncleaned:
@@ -877,7 +882,7 @@ class OpenSearchDocumentIndex(DocumentIndex):
         )
         results: list[InferenceChunk] = []
         for chunk_request in chunk_requests:
-            search_hits: list[SearchHit[DocumentChunk]] = []
+            search_hits: list[SearchHit[DocumentChunkWithoutVectors]] = []
             query_body = DocumentQuery.get_from_document_id_query(
                 document_id=chunk_request.document_id,
                 tenant_state=self._tenant_state,
@@ -896,6 +901,7 @@ class OpenSearchDocumentIndex(DocumentIndex):
             search_hits = self._client.search(
                 body=query_body,
                 search_pipeline_id=None,
+                search_type=OpenSearchSearchType.ID_RETRIEVAL,
             )
             inference_chunks_uncleaned: list[InferenceChunkUncleaned] = [
                 _convert_retrieved_opensearch_chunk_to_inference_chunk_uncleaned(
@@ -919,6 +925,8 @@ class OpenSearchDocumentIndex(DocumentIndex):
         filters: IndexFilters,
         num_to_retrieve: int,
     ) -> list[InferenceChunk]:
+        # TODO(andrei): There is some duplicated logic in this function with
+        # others in this file.
         logger.debug(
             f"[OpenSearchDocumentIndex] Hybrid retrieving {num_to_retrieve} chunks for index {self._index_name}."
         )
@@ -940,17 +948,99 @@ class OpenSearchDocumentIndex(DocumentIndex):
             index_filters=filters,
             include_hidden=False,
         )
-        # NOTE: Using z-score normalization here because it's better for hybrid
-        # search from a theoretical standpoint. Empirically on a small dataset
-        # of up to 10K docs, it's not very different. Likely more impactful at
-        # scale.
-        # https://opensearch.org/blog/introducing-the-z-score-normalization-technique-for-hybrid-search/
-        search_hits: list[SearchHit[DocumentChunk]] = self._client.search(
+        normalization_pipeline_name, _ = get_normalization_pipeline_name_and_config()
+        search_hits: list[SearchHit[DocumentChunkWithoutVectors]] = self._client.search(
             body=query_body,
-            search_pipeline_id=ZSCORE_NORMALIZATION_PIPELINE_NAME,
+            search_pipeline_id=normalization_pipeline_name,
+            search_type=OpenSearchSearchType.HYBRID,
         )
 
-        # Good place for a breakpoint to inspect the search hits if you have "explain" enabled.
+        # Good place for a breakpoint to inspect the search hits if you have
+        # "explain" enabled.
+        inference_chunks_uncleaned: list[InferenceChunkUncleaned] = [
+            _convert_retrieved_opensearch_chunk_to_inference_chunk_uncleaned(
+                search_hit.document_chunk, search_hit.score, search_hit.match_highlights
+            )
+            for search_hit in search_hits
+        ]
+        inference_chunks: list[InferenceChunk] = cleanup_content_for_chunks(
+            inference_chunks_uncleaned
+        )
+
+        return inference_chunks
+
+    def keyword_retrieval(
+        self,
+        query: str,
+        filters: IndexFilters,
+        num_to_retrieve: int,
+    ) -> list[InferenceChunk]:
+        # TODO(andrei): There is some duplicated logic in this function with
+        # others in this file.
+        logger.debug(
+            f"[OpenSearchDocumentIndex] Keyword retrieving {num_to_retrieve} chunks for index {self._index_name}."
+        )
+        query_body = DocumentQuery.get_keyword_search_query(
+            query_text=query,
+            num_hits=num_to_retrieve,
+            tenant_state=self._tenant_state,
+            # NOTE: Index filters includes metadata tags which were filtered
+            # for invalid unicode at indexing time. In theory it would be
+            # ideal to do filtering here as well, in practice we never did
+            # that in the Vespa codepath and have not seen issues in
+            # production, so we deliberately conform to the existing logic
+            # in order to not unknowningly introduce a possible bug.
+            index_filters=filters,
+            include_hidden=False,
+        )
+        search_hits: list[SearchHit[DocumentChunkWithoutVectors]] = self._client.search(
+            body=query_body,
+            search_pipeline_id=None,
+            search_type=OpenSearchSearchType.KEYWORD,
+        )
+
+        inference_chunks_uncleaned: list[InferenceChunkUncleaned] = [
+            _convert_retrieved_opensearch_chunk_to_inference_chunk_uncleaned(
+                search_hit.document_chunk, search_hit.score, search_hit.match_highlights
+            )
+            for search_hit in search_hits
+        ]
+        inference_chunks: list[InferenceChunk] = cleanup_content_for_chunks(
+            inference_chunks_uncleaned
+        )
+
+        return inference_chunks
+
+    def semantic_retrieval(
+        self,
+        query_embedding: Embedding,
+        filters: IndexFilters,
+        num_to_retrieve: int,
+    ) -> list[InferenceChunk]:
+        # TODO(andrei): There is some duplicated logic in this function with
+        # others in this file.
+        logger.debug(
+            f"[OpenSearchDocumentIndex] Semantic retrieving {num_to_retrieve} chunks for index {self._index_name}."
+        )
+        query_body = DocumentQuery.get_semantic_search_query(
+            query_embedding=query_embedding,
+            num_hits=num_to_retrieve,
+            tenant_state=self._tenant_state,
+            # NOTE: Index filters includes metadata tags which were filtered
+            # for invalid unicode at indexing time. In theory it would be
+            # ideal to do filtering here as well, in practice we never did
+            # that in the Vespa codepath and have not seen issues in
+            # production, so we deliberately conform to the existing logic
+            # in order to not unknowningly introduce a possible bug.
+            index_filters=filters,
+            include_hidden=False,
+        )
+        search_hits: list[SearchHit[DocumentChunkWithoutVectors]] = self._client.search(
+            body=query_body,
+            search_pipeline_id=None,
+            search_type=OpenSearchSearchType.SEMANTIC,
+        )
+
         inference_chunks_uncleaned: list[InferenceChunkUncleaned] = [
             _convert_retrieved_opensearch_chunk_to_inference_chunk_uncleaned(
                 search_hit.document_chunk, search_hit.score, search_hit.match_highlights
@@ -977,9 +1067,10 @@ class OpenSearchDocumentIndex(DocumentIndex):
             index_filters=filters,
             num_to_retrieve=num_to_retrieve,
         )
-        search_hits: list[SearchHit[DocumentChunk]] = self._client.search(
+        search_hits: list[SearchHit[DocumentChunkWithoutVectors]] = self._client.search(
             body=query_body,
             search_pipeline_id=None,
+            search_type=OpenSearchSearchType.RANDOM,
         )
         inference_chunks_uncleaned: list[InferenceChunkUncleaned] = [
             _convert_retrieved_opensearch_chunk_to_inference_chunk_uncleaned(

@@ -1,12 +1,9 @@
-import "@opal/components/tooltip.css";
 import {
   Interactive,
-  type InteractiveStatefulState,
-  type InteractiveStatefulInteraction,
   type InteractiveStatefulProps,
   InteractiveContainerRoundingVariant,
 } from "@opal/core";
-import { type WidthVariant } from "@opal/shared";
+import type { ExtremaSizeVariants } from "@opal/types";
 import type { TooltipSide } from "@opal/components";
 import type { DistributiveOmit } from "@opal/types";
 import type { ContentActionProps } from "@opal/layouts/content-action/components";
@@ -22,39 +19,25 @@ type ContentPassthroughProps = DistributiveOmit<
   "paddingVariant" | "widthVariant" | "ref" | "withInteractive"
 >;
 
-type LineItemButtonOwnProps = {
+type LineItemButtonOwnProps = Pick<
+  InteractiveStatefulProps,
+  | "state"
+  | "interaction"
+  | "onClick"
+  | "href"
+  | "target"
+  | "group"
+  | "ref"
+  | "type"
+> & {
   /** Interactive select variant. @default "select-light" */
   selectVariant?: "select-light" | "select-heavy";
-
-  /** Value state. @default "empty" */
-  state?: InteractiveStatefulState;
-
-  /** JS-controllable interaction state override. @default "rest" */
-  interaction?: InteractiveStatefulInteraction;
-
-  /** Click handler. */
-  onClick?: InteractiveStatefulProps["onClick"];
-
-  /** When provided, renders an anchor instead of a div. */
-  href?: string;
-
-  /** Anchor target (e.g. "_blank"). */
-  target?: string;
-
-  /** Interactive group key. */
-  group?: string;
-
-  /** Forwarded ref. */
-  ref?: React.Ref<HTMLElement>;
 
   /** Corner rounding preset (height is always content-driven). @default "default" */
   roundingVariant?: InteractiveContainerRoundingVariant;
 
   /** Container width. @default "full" */
-  width?: WidthVariant;
-
-  /** HTML button type. @default "button" */
-  type?: "submit" | "button" | "reset";
+  width?: ExtremaSizeVariants;
 
   /** Tooltip text shown on hover. */
   tooltip?: string;
@@ -79,11 +62,11 @@ function LineItemButton({
   target,
   group,
   ref,
+  type = "button",
 
   // Sizing
   roundingVariant = "default",
   width = "full",
-  type = "button",
   tooltip,
   tooltipSide = "top",
 

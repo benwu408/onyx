@@ -1,9 +1,13 @@
 "use client";
 
 import { Button } from "@opal/components/buttons/button/components";
-import type { SizeVariant } from "@opal/shared";
+import type { ContainerSizeVariants } from "@opal/types";
 import SvgEdit from "@opal/icons/edit";
-import type { IconFunctionComponent } from "@opal/types";
+import type { IconFunctionComponent, RichStr } from "@opal/types";
+import {
+  resolveStr,
+  toPlainString,
+} from "@opal/components/text/InlineMarkdown";
 import { cn } from "@opal/utils";
 import { useState } from "react";
 
@@ -25,7 +29,7 @@ interface ContentLgPresetConfig {
   /** Title line-height — also used as icon container min-height (CSS value). */
   lineHeight: string;
   /** Button `size` prop for the edit button. Uses the shared `SizeVariant` scale. */
-  editButtonSize: SizeVariant;
+  editButtonSize: ContainerSizeVariants;
   /** Tailwind padding class for the edit button container. */
   editButtonPadding: string;
 }
@@ -35,10 +39,10 @@ interface ContentLgProps {
   icon?: IconFunctionComponent;
 
   /** Main title text. */
-  title: string;
+  title: string | RichStr;
 
   /** Optional description below the title. */
-  description?: string;
+  description?: string | RichStr;
 
   /** Enable inline editing of the title. */
   editable?: boolean;
@@ -96,18 +100,18 @@ function ContentLg({
   ref,
 }: ContentLgProps) {
   const [editing, setEditing] = useState(false);
-  const [editValue, setEditValue] = useState(title);
+  const [editValue, setEditValue] = useState(toPlainString(title));
 
   const config = CONTENT_LG_PRESETS[sizePreset];
 
   function startEditing() {
-    setEditValue(title);
+    setEditValue(toPlainString(title));
     setEditing(true);
   }
 
   function commit() {
     const value = editValue.trim();
-    if (value && value !== title) onTitleChange?.(value);
+    if (value && value !== toPlainString(title)) onTitleChange?.(value);
     setEditing(false);
   }
 
@@ -157,7 +161,7 @@ function ContentLg({
                 onKeyDown={(e) => {
                   if (e.key === "Enter") commit();
                   if (e.key === "Escape") {
-                    setEditValue(title);
+                    setEditValue(toPlainString(title));
                     setEditing(false);
                   }
                 }}
@@ -174,8 +178,9 @@ function ContentLg({
               )}
               onClick={editable ? startEditing : undefined}
               style={{ height: config.lineHeight }}
+              title={toPlainString(title)}
             >
-              {title}
+              {resolveStr(title)}
             </span>
           )}
 
@@ -198,9 +203,9 @@ function ContentLg({
           )}
         </div>
 
-        {description && (
+        {description && toPlainString(description) && (
           <div className="opal-content-lg-description font-secondary-body text-text-03">
-            {description}
+            {resolveStr(description)}
           </div>
         )}
       </div>

@@ -278,14 +278,17 @@ USING_AWS_MANAGED_OPENSEARCH = (
 OPENSEARCH_PROFILING_DISABLED = (
     os.environ.get("OPENSEARCH_PROFILING_DISABLED", "").lower() == "true"
 )
-
+# Whether to disable match highlights for OpenSearch. Defaults to True for now
+# as we investigate query performance.
+OPENSEARCH_MATCH_HIGHLIGHTS_DISABLED = (
+    os.environ.get("OPENSEARCH_MATCH_HIGHLIGHTS_DISABLED", "true").lower() == "true"
+)
 # When enabled, OpenSearch returns detailed score breakdowns for each hit.
 # Useful for debugging and tuning search relevance. Has ~10-30% performance overhead according to documentation.
 # Seems for Hybrid Search in practice, the impact is actually more like 1000x slower.
 OPENSEARCH_EXPLAIN_ENABLED = (
     os.environ.get("OPENSEARCH_EXPLAIN_ENABLED", "").lower() == "true"
 )
-
 # Analyzer used for full-text fields (title, content). Use OpenSearch built-in analyzer
 # names (e.g. "english", "standard", "german"). Affects stemming and tokenization;
 # existing indices need reindexing after a change.
@@ -318,8 +321,20 @@ VERIFY_CREATE_OPENSEARCH_INDEX_ON_INIT_MT = (
 OPENSEARCH_MIGRATION_GET_VESPA_CHUNKS_PAGE_SIZE = int(
     os.environ.get("OPENSEARCH_MIGRATION_GET_VESPA_CHUNKS_PAGE_SIZE") or 500
 )
-OPENSEARCH_OVERRIDE_DEFAULT_NUM_HYBRID_SEARCH_CANDIDATES = int(
-    os.environ.get("OPENSEARCH_DEFAULT_NUM_HYBRID_SEARCH_CANDIDATES") or 0
+# If set, will override the default number of shards and replicas for the index.
+OPENSEARCH_INDEX_NUM_SHARDS: int | None = (
+    int(os.environ["OPENSEARCH_INDEX_NUM_SHARDS"])
+    if os.environ.get("OPENSEARCH_INDEX_NUM_SHARDS", None) is not None
+    else None
+)
+OPENSEARCH_INDEX_NUM_REPLICAS: int | None = (
+    int(os.environ["OPENSEARCH_INDEX_NUM_REPLICAS"])
+    if os.environ.get("OPENSEARCH_INDEX_NUM_REPLICAS", None) is not None
+    else None
+)
+ONYX_SEARCH_UI_USES_OPENSEARCH_KEYWORD_SEARCH = (
+    os.environ.get("ONYX_SEARCH_UI_USES_OPENSEARCH_KEYWORD_SEARCH", "").lower()
+    == "true"
 )
 
 VESPA_HOST = os.environ.get("VESPA_HOST") or "localhost"
