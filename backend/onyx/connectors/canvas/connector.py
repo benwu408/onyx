@@ -1,10 +1,9 @@
 from datetime import datetime
 from datetime import timezone
+from enum import StrEnum
 from typing import Any
 from typing import cast
-from typing import Literal
 from typing import NoReturn
-from typing import TypeAlias
 
 from pydantic import BaseModel
 from retry import retry
@@ -61,6 +60,51 @@ def _handle_canvas_api_error(e: OnyxError) -> NoReturn:
         raise ConnectorValidationError(
             f"Canvas API error (status={e.status_code}): {e}"
         )
+
+
+_STAGE_CONFIG: dict[CanvasStage, dict[str, Any]] = {
+    CanvasStage.PAGES: {
+        "endpoint": "courses/{course_id}/pages",
+        "params": {
+            "per_page": "100",
+            "include[]": "body",
+            "published": "true",
+            "sort": "updated_at",
+            "order": "desc",
+        },
+    },
+    CanvasStage.ASSIGNMENTS: {
+        "endpoint": "courses/{course_id}/assignments",
+        "params": {"per_page": "100", "published": "true"},
+    },
+    CanvasStage.ANNOUNCEMENTS: {
+        "endpoint": "announcements",
+        "params": {
+            "per_page": "100",
+            "context_codes[]": "course_{course_id}",
+            "active_only": "true",
+        },
+    },
+}
+
+
+def _parse_canvas_dt(timestamp_str: str) -> datetime:
+    """Parse a Canvas ISO-8601 timestamp (e.g. '2025-06-15T12:00:00Z')
+    into a timezone-aware UTC datetime.
+
+    Canvas returns timestamps with a trailing 'Z' instead of '+00:00',
+    so we normalise before parsing.
+    """
+    return datetime.fromisoformat(
+        timestamp_str.replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+
+
+def _in_time_window(
+    timestamp_str: str, start: float, end: float
+) -> bool:
+    """Check whether a Canvas ISO-8601 timestamp falls within (start, end]."""
+    return start < _parse_canvas_dt(timestamp_str).timestamp() <= end
 
 
 class CanvasCourse(BaseModel):
@@ -147,7 +191,10 @@ class CanvasAnnouncement(BaseModel):
         )
 
 
-CanvasStage: TypeAlias = Literal["pages", "assignments", "announcements"]
+class CanvasStage(StrEnum):
+    PAGES = "pages"
+    ASSIGNMENTS = "assignments"
+    ANNOUNCEMENTS = "announcements"
 
 
 class CanvasConnectorCheckpoint(ConnectorCheckpoint):
@@ -167,13 +214,13 @@ class CanvasConnectorCheckpoint(ConnectorCheckpoint):
 
     course_ids: list[int] = []
     current_course_index: int = 0
-    stage: CanvasStage = "pages"
+    stage: CanvasStage = CanvasStage.PAGES
     next_url: str | None = None
 
     def advance_course(self) -> None:
         """Move to the next course and reset within-course state."""
         self.current_course_index += 1
-        self.stage = "pages"
+        self.stage = CanvasStage.PAGES
         self.next_url = None
 
 
@@ -298,11 +345,7 @@ class CanvasConnector(
             text_parts.append(body_text)
 
         doc_updated_at = (
-            datetime.fromisoformat(page.updated_at.replace("Z", "+00:00")).astimezone(
-                timezone.utc
-            )
-            if page.updated_at
-            else None
+            _parse_canvas_dt(page.updated_at) if page.updated_at else None
         )
 
         document = self._build_document(
@@ -327,15 +370,11 @@ class CanvasConnector(
         if desc_text:
             text_parts.append(desc_text)
         if assignment.due_at:
-            due_dt = datetime.fromisoformat(
-                assignment.due_at.replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
+            due_dt = _parse_canvas_dt(assignment.due_at)
             text_parts.append(f"Due: {due_dt.strftime('%B %d, %Y %H:%M UTC')}")
 
         doc_updated_at = (
-            datetime.fromisoformat(
-                assignment.updated_at.replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
+            _parse_canvas_dt(assignment.updated_at)
             if assignment.updated_at
             else None
         )
@@ -363,9 +402,7 @@ class CanvasConnector(
             text_parts.append(msg_text)
 
         doc_updated_at = (
-            datetime.fromisoformat(
-                announcement.posted_at.replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
+            _parse_canvas_dt(announcement.posted_at)
             if announcement.posted_at
             else None
         )
@@ -402,6 +439,61 @@ class CanvasConnector(
         self._canvas_client = client
         return None
 
+    def _fetch_stage_page(
+        self,
+        next_url: str | None,
+        endpoint: str,
+        params: dict[str, Any],
+        stage: str,
+        course_id: int,
+    ) -> tuple[list[Any], str | None]:
+        """Fetch one page of API results for the current stage.
+
+        Returns (items, next_url). Raises on auth/security errors;
+        logs and re-raises a ValueError on transient failures so the
+        caller can handle checkpoint retry.
+        """
+        try:
+            if next_url:
+                # Resuming mid-pagination: the next_url from Canvas's
+                # Link header already contains endpoint + query params.
+                response, result_next_url = self.canvas_client.get(
+                    full_url=next_url
+                )
+            else:
+                # First request for this stage: build from endpoint + params.
+                response, result_next_url = self.canvas_client.get(
+                    endpoint, params=params
+                )
+        except OnyxError as oe:
+            # Re-raise security errors from _parse_next_link (host/scheme
+            # mismatch on pagination URLs) — these must not be silenced.
+            is_api_error = oe._status_code_override is not None
+            if not is_api_error:
+                raise
+            if oe.status_code in (401, 403):
+                _handle_canvas_api_error(oe)
+            logger.warning(
+                f"Failed to fetch {stage} for course {course_id}: {oe}"
+            )
+            raise
+        except Exception as e:
+            logger.warning(
+                f"Failed to fetch {stage} for course {course_id}: {e}"
+            )
+            raise
+        return response or [], result_next_url
+
+    def _maybe_attach_permissions(
+        self,
+        document: Document,
+        course_id: int,
+        include_permissions: bool,
+    ) -> Document:
+        if include_permissions:
+            document.external_access = self._get_course_permissions(course_id)
+        return document
+
     def _load_from_checkpoint(
         self,
         start: SecondsSinceUnixEpoch,
@@ -421,8 +513,6 @@ class CanvasConnector(
                 new_checkpoint.has_more = True
                 return new_checkpoint
             new_checkpoint.course_ids = [c.id for c in courses]
-            new_checkpoint.current_course_index = 0
-            new_checkpoint.stage = "pages"
             logger.info(
                 f"Found {len(courses)} Canvas courses to process"
             )
@@ -441,126 +531,72 @@ class CanvasConnector(
         ]
         stage = new_checkpoint.stage
 
-        if stage not in ("pages", "assignments", "announcements"):
+        if stage not in CanvasStage:
             raise ValueError(
                 f"Invalid checkpoint stage: {stage!r}"
             )
 
-        def _in_time_window(timestamp_str: str) -> bool:
-            ts = (
-                datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-                .astimezone(timezone.utc)
-                .timestamp()
-            )
-            return start < ts <= end
-
-        def _maybe_attach_permissions(document: Document) -> Document:
-            if include_permissions:
-                document.external_access = self._get_course_permissions(
-                    course_id
-                )
-            return document
-
-        # Fetch one page of API results for the current stage.
-        # If next_url is set, we're resuming mid-pagination.
-        start_dt = datetime.fromtimestamp(start, tz=timezone.utc)
-        end_dt = datetime.fromtimestamp(end, tz=timezone.utc)
-        stage_config: dict[str, dict[str, Any]] = {
-            "pages": {
-                "endpoint": f"courses/{course_id}/pages",
-                "params": {
-                    "per_page": "100",
-                    "include[]": "body",
-                    "published": "true",
-                    "sort": "updated_at",
-                    "order": "desc",
-                },
-            },
-            "assignments": {
-                "endpoint": f"courses/{course_id}/assignments",
-                "params": {"per_page": "100", "published": "true"},
-            },
-            "announcements": {
-                "endpoint": "announcements",
-                "params": {
-                    "per_page": "100",
-                    "context_codes[]": f"course_{course_id}",
-                    "active_only": "true",
-                    "start_date": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "end_date": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                },
-            },
+        # Build endpoint + params from the static template.
+        config = _STAGE_CONFIG[stage]
+        endpoint = config["endpoint"].format(course_id=course_id)
+        params = {
+            k: v.format(course_id=course_id)
+            for k, v in config["params"].items()
         }
-        config = stage_config[stage]
+        if stage == CanvasStage.ANNOUNCEMENTS:
+            start_dt = datetime.fromtimestamp(start, tz=timezone.utc)
+            end_dt = datetime.fromtimestamp(end, tz=timezone.utc)
+            params["start_date"] = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            params["end_date"] = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         try:
-            if new_checkpoint.next_url:
-                response, result_next_url = self.canvas_client.get(
-                    full_url=new_checkpoint.next_url
-                )
-            else:
-                response, result_next_url = self.canvas_client.get(
-                    config["endpoint"], params=config["params"]
-                )
-        except OnyxError as oe:
-            # Re-raise security errors from _parse_next_link (host/scheme
-            # mismatch on pagination URLs) — these must not be silenced.
-            # Security errors have no HTTP status code override (they are
-            # raised locally, not from an API response).
-            is_api_error = oe._status_code_override is not None
-            if not is_api_error:
-                raise
-            if oe.status_code in (401, 403):
-                _handle_canvas_api_error(oe)
-            logger.warning(
-                f"Failed to fetch {stage} for course {course_id}: {oe}"
+            response, result_next_url = self._fetch_stage_page(
+                next_url=new_checkpoint.next_url,
+                endpoint=endpoint,
+                params=params,
+                stage=stage,
+                course_id=course_id,
             )
-            new_checkpoint.has_more = True
-            return new_checkpoint
-        except Exception as e:
-            logger.warning(
-                f"Failed to fetch {stage} for course {course_id}: {e}"
-            )
+        except Exception:
             new_checkpoint.has_more = True
             return new_checkpoint
 
         # Process fetched items
         early_exit = False
-        for item in response or []:
+        for item in response:
             try:
-                if stage == "pages":
+                if stage == CanvasStage.PAGES:
                     page = CanvasPage.from_api(item, course_id=course_id)
                     if not page.updated_at:
                         continue
                     # Pages are sorted by updated_at desc — once we see
                     # an item at or before `start`, all remaining items
                     # on this and subsequent pages are older too.
-                    if not _in_time_window(page.updated_at):
-                        ts = (
-                            datetime.fromisoformat(
-                                page.updated_at.replace("Z", "+00:00")
-                            )
-                            .astimezone(timezone.utc)
-                            .timestamp()
-                        )
-                        if ts <= start:
+                    if not _in_time_window(page.updated_at, start, end):
+                        if _parse_canvas_dt(page.updated_at).timestamp() <= start:
                             early_exit = True
                             break
                         # ts > end: page is newer than our window, skip it
                         continue
                     doc = self._convert_page_to_document(page)
-                    yield _maybe_attach_permissions(doc)
+                    yield self._maybe_attach_permissions(
+                        doc, course_id, include_permissions
+                    )
 
-                elif stage == "assignments":
+                elif stage == CanvasStage.ASSIGNMENTS:
                     assignment = CanvasAssignment.from_api(
                         item, course_id=course_id
                     )
-                    if not assignment.updated_at or not _in_time_window(assignment.updated_at):
+                    if not assignment.updated_at or not _in_time_window(
+                        assignment.updated_at, start, end
+                    ):
                         continue
                     doc = self._convert_assignment_to_document(assignment)
-                    yield _maybe_attach_permissions(doc)
+                    yield self._maybe_attach_permissions(
+                        doc, course_id, include_permissions
+                    )
 
-                elif stage == "announcements":
+                elif stage == CanvasStage.ANNOUNCEMENTS:
                     announcement = CanvasAnnouncement.from_api(
                         item, course_id=course_id
                     )
@@ -570,14 +606,18 @@ class CanvasConnector(
                             f"course {course_id}: no posted_at"
                         )
                         continue
-                    if not _in_time_window(announcement.posted_at):
+                    if not _in_time_window(
+                        announcement.posted_at, start, end
+                    ):
                         continue
                     doc = self._convert_announcement_to_document(announcement)
-                    yield _maybe_attach_permissions(doc)
+                    yield self._maybe_attach_permissions(
+                        doc, course_id, include_permissions
+                    )
 
             except Exception as e:
                 item_id = item.get("id") or item.get("page_id", "unknown")
-                if stage == "pages":
+                if stage == CanvasStage.PAGES:
                     doc_link = (
                         f"{self.canvas_base_url}/courses/{course_id}"
                         f"/pages/{item.get('url', '')}"
@@ -604,14 +644,10 @@ class CanvasConnector(
         else:
             # Stage complete — advance to next stage
             new_checkpoint.next_url = None
-            next_stages: dict[str, CanvasStage | None] = {
-                "pages": "assignments",
-                "assignments": "announcements",
-                "announcements": None,
-            }
-            next_stage = next_stages[stage]
-            if next_stage:
-                new_checkpoint.stage = next_stage
+            stages = list(CanvasStage)
+            idx = stages.index(stage)
+            if idx + 1 < len(stages):
+                new_checkpoint.stage = stages[idx + 1]
             else:
                 new_checkpoint.advance_course()
 
