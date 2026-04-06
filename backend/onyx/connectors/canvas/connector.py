@@ -62,6 +62,12 @@ def _handle_canvas_api_error(e: OnyxError) -> NoReturn:
         )
 
 
+class CanvasStage(StrEnum):
+    PAGES = "pages"
+    ASSIGNMENTS = "assignments"
+    ANNOUNCEMENTS = "announcements"
+
+
 _STAGE_CONFIG: dict[CanvasStage, dict[str, Any]] = {
     CanvasStage.PAGES: {
         "endpoint": "courses/{course_id}/pages",
@@ -189,12 +195,6 @@ class CanvasAnnouncement(BaseModel):
             posted_at=payload.get("posted_at"),
             course_id=course_id,
         )
-
-
-class CanvasStage(StrEnum):
-    PAGES = "pages"
-    ASSIGNMENTS = "assignments"
-    ANNOUNCEMENTS = "announcements"
 
 
 class CanvasConnectorCheckpoint(ConnectorCheckpoint):
@@ -557,6 +557,15 @@ class CanvasConnector(
                 stage=stage,
                 course_id=course_id,
             )
+        except (CredentialExpiredError, InsufficientPermissionsError):
+            raise
+        except OnyxError as e:
+            # Security validation errors from pagination URL parsing must
+            # fail fast; upstream HTTP errors remain retryable.
+            if e._status_code_override is None:
+                raise
+            new_checkpoint.has_more = True
+            return new_checkpoint
         except Exception:
             new_checkpoint.has_more = True
             return new_checkpoint

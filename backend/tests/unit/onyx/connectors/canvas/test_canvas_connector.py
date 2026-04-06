@@ -20,6 +20,7 @@ from onyx.connectors.exceptions import UnexpectedValidationError
 from onyx.connectors.models import ConnectorFailure
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 
 # ---------------------------------------------------------------------------
@@ -1197,7 +1198,7 @@ class TestLoadFromCheckpoint:
         old_page = _mock_page(10, updated_at="2025-01-01T00:00:00Z")
         new_page = _mock_page(11, title="New Page", updated_at="2025-06-15T12:00:00Z")
         mock_requests.get.side_effect = _make_url_dispatcher(
-            pages=[old_page, new_page]
+            pages=[new_page, old_page]
         )
         connector = _build_connector()
         cp = CanvasConnectorCheckpoint(
@@ -1244,6 +1245,34 @@ class TestLoadFromCheckpoint:
         assert items == []
         assert new_cp.stage == "pages"
         assert new_cp.current_course_index == 0
+
+    def test_fatal_auth_failure_during_stage_fetch_propagates(self) -> None:
+        connector = _build_connector()
+        cp = CanvasConnectorCheckpoint(
+            has_more=True, course_ids=[1], current_course_index=0, stage="pages"
+        )
+
+        with patch.object(
+            connector,
+            "_fetch_stage_page",
+            side_effect=CredentialExpiredError("expired"),
+        ):
+            with pytest.raises(CredentialExpiredError):
+                _run_checkpoint(connector, cp)
+
+    def test_security_failure_during_stage_fetch_propagates(self) -> None:
+        connector = _build_connector()
+        cp = CanvasConnectorCheckpoint(
+            has_more=True, course_ids=[1], current_course_index=0, stage="pages"
+        )
+
+        with patch.object(
+            connector,
+            "_fetch_stage_page",
+            side_effect=OnyxError(OnyxErrorCode.BAD_GATEWAY, "bad next link"),
+        ):
+            with pytest.raises(OnyxError, match="bad next link"):
+                _run_checkpoint(connector, cp)
 
     @patch("onyx.connectors.canvas.client.rl_requests")
     def test_per_document_conversion_failure_yields_connector_failure(
