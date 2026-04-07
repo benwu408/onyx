@@ -11,8 +11,12 @@ import pytest
 from onyx.access.models import ExternalAccess
 from onyx.configs.constants import DocumentSource
 from onyx.connectors.canvas.client import CanvasApiClient
+from onyx.connectors.canvas.connector import _in_time_window
+from onyx.connectors.canvas.connector import _parse_canvas_dt
+from onyx.connectors.canvas.connector import _unix_to_canvas_time
 from onyx.connectors.canvas.connector import CanvasConnector
 from onyx.connectors.canvas.connector import CanvasConnectorCheckpoint
+from onyx.connectors.canvas.connector import CanvasStage
 from onyx.connectors.exceptions import ConnectorValidationError
 from onyx.connectors.exceptions import CredentialExpiredError
 from onyx.connectors.exceptions import InsufficientPermissionsError
@@ -1252,11 +1256,8 @@ class TestLoadFromCheckpoint:
             has_more=True, course_ids=[1], current_course_index=0, stage="pages"
         )
 
-        with patch.object(
-            connector,
-            "_fetch_stage_page",
-            side_effect=CredentialExpiredError("expired"),
-        ):
+        with patch("onyx.connectors.canvas.client.rl_requests") as mock_requests:
+            mock_requests.get.return_value = _mock_response(401, {})
             with pytest.raises(CredentialExpiredError):
                 _run_checkpoint(connector, cp)
 
@@ -1358,3 +1359,272 @@ class TestLoadFromCheckpointWithPermSync:
         assert items[0].external_access == expected_access
         assert new_cp.stage == "assignments"
         mock_perms.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Helper function tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseCanvasDt:
+    def test_z_suffix_parsed_as_utc(self) -> None:
+        result = _parse_canvas_dt("2025-06-15T12:00:00Z")
+
+        expected = datetime(2025, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        assert result == expected
+
+    def test_plus_offset_parsed_as_utc(self) -> None:
+        result = _parse_canvas_dt("2025-06-15T12:00:00+00:00")
+
+        expected = datetime(2025, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        assert result == expected
+
+    def test_result_is_timezone_aware(self) -> None:
+        result = _parse_canvas_dt("2025-01-01T00:00:00Z")
+
+        assert result.tzinfo is not None
+
+
+class TestUnixToCanvasTime:
+    def test_known_epoch_produces_expected_string(self) -> None:
+        epoch = datetime(2025, 6, 15, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+
+        result = _unix_to_canvas_time(epoch)
+
+        assert result == "2025-06-15T12:00:00Z"
+
+    def test_round_trips_with_parse_canvas_dt(self) -> None:
+        epoch = datetime(2025, 3, 10, 8, 30, 0, tzinfo=timezone.utc).timestamp()
+
+        result = _parse_canvas_dt(_unix_to_canvas_time(epoch))
+        expected = datetime(2025, 3, 10, 8, 30, 0, tzinfo=timezone.utc)
+
+        assert result == expected
+
+
+class TestInTimeWindow:
+    def test_inside_window(self) -> None:
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+
+        result = _in_time_window("2025-06-15T12:00:00Z", start, end)
+
+        assert result is True
+
+    def test_before_window(self) -> None:
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+
+        result = _in_time_window("2025-05-01T12:00:00Z", start, end)
+
+        assert result is False
+
+    def test_after_window(self) -> None:
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+
+        result = _in_time_window("2025-07-15T12:00:00Z", start, end)
+
+        assert result is False
+
+    def test_start_boundary_is_exclusive(self) -> None:
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+
+        result = _in_time_window("2025-06-01T00:00:00Z", start, end)
+
+        assert result is False
+
+    def test_end_boundary_is_inclusive(self) -> None:
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+
+        result = _in_time_window("2025-06-30T00:00:00Z", start, end)
+
+        assert result is True
+
+
+class TestFetchStagePage:
+    def test_uses_full_url_when_next_url_set(self) -> None:
+        connector = _build_connector()
+        connector.canvas_client.get = MagicMock(return_value=([{"id": 1}], None))
+
+        result, next_url = connector._fetch_stage_page(
+            next_url="https://myschool.instructure.com/api/v1/courses?page=2",
+            endpoint="courses/1/pages",
+            params={"per_page": "100"},
+        )
+
+        connector.canvas_client.get.assert_called_once_with(
+            full_url="https://myschool.instructure.com/api/v1/courses?page=2"
+        )
+        assert result == [{"id": 1}]
+
+    def test_uses_endpoint_and_params_when_no_next_url(self) -> None:
+        connector = _build_connector()
+        connector.canvas_client.get = MagicMock(return_value=([{"id": 1}], None))
+
+        result, next_url = connector._fetch_stage_page(
+            next_url=None,
+            endpoint="courses/1/pages",
+            params={"per_page": "100"},
+        )
+
+        connector.canvas_client.get.assert_called_once_with(
+            endpoint="courses/1/pages", params={"per_page": "100"}
+        )
+
+    def test_returns_empty_list_for_none_response(self) -> None:
+        connector = _build_connector()
+        connector.canvas_client.get = MagicMock(return_value=(None, None))
+
+        result, next_url = connector._fetch_stage_page(
+            next_url=None,
+            endpoint="courses/1/pages",
+            params={},
+        )
+
+        assert result == []
+        assert next_url is None
+
+
+class TestProcessItems:
+    def test_pages_in_window_converted(self) -> None:
+        connector = _build_connector()
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+
+        results, early_exit = connector._process_items(
+            response=[_mock_page(10, "Syllabus", "2025-06-15T12:00:00Z")],
+            stage=CanvasStage.PAGES,
+            course_id=1,
+            start=start,
+            end=end,
+            include_permissions=False,
+        )
+
+        assert len(results) == 1
+        assert isinstance(results[0], Document)
+        assert early_exit is False
+
+    def test_pages_outside_window_skipped(self) -> None:
+        connector = _build_connector()
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+
+        results, early_exit = connector._process_items(
+            response=[_mock_page(10, "Old", "2025-01-01T12:00:00Z")],
+            stage=CanvasStage.PAGES,
+            course_id=1,
+            start=start,
+            end=end,
+            include_permissions=False,
+        )
+
+        assert results == []
+        assert early_exit is True
+
+    def test_assignments_in_window_converted(self) -> None:
+        connector = _build_connector()
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+
+        results, early_exit = connector._process_items(
+            response=[_mock_assignment(20, "HW1", 1, "2025-06-15T12:00:00Z")],
+            stage=CanvasStage.ASSIGNMENTS,
+            course_id=1,
+            start=start,
+            end=end,
+            include_permissions=False,
+        )
+
+        assert len(results) == 1
+        assert isinstance(results[0], Document)
+        assert early_exit is False
+
+    def test_announcements_in_window_converted(self) -> None:
+        connector = _build_connector()
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+
+        results, early_exit = connector._process_items(
+            response=[_mock_announcement(30, "News", 1, "2025-06-15T12:00:00Z")],
+            stage=CanvasStage.ANNOUNCEMENTS,
+            course_id=1,
+            start=start,
+            end=end,
+            include_permissions=False,
+        )
+
+        assert len(results) == 1
+        assert isinstance(results[0], Document)
+        assert early_exit is False
+
+    def test_bad_item_yields_connector_failure(self) -> None:
+        connector = _build_connector()
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+        bad_page = {
+            "page_id": 10, "url": "test", "title": "Test",
+            "body": None, "created_at": "2025-06-15T12:00:00Z",
+            "updated_at": "bad-date",
+        }
+
+        results, early_exit = connector._process_items(
+            response=[bad_page],
+            stage=CanvasStage.PAGES,
+            course_id=1,
+            start=start,
+            end=end,
+            include_permissions=False,
+        )
+
+        assert len(results) == 1
+        assert isinstance(results[0], ConnectorFailure)
+
+    def test_page_early_exit_on_old_item(self) -> None:
+        """Pages sorted desc — item before start triggers early exit."""
+        connector = _build_connector()
+        start = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+        end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
+
+        results, early_exit = connector._process_items(
+            response=[
+                _mock_page(10, "New", "2025-06-15T12:00:00Z"),
+                _mock_page(11, "Old", "2025-05-01T12:00:00Z"),
+                _mock_page(12, "Older", "2025-04-01T12:00:00Z"),
+            ],
+            stage=CanvasStage.PAGES,
+            course_id=1,
+            start=start,
+            end=end,
+            include_permissions=False,
+        )
+
+        assert len(results) == 1
+        assert early_exit is True
+
+
+class TestMaybeAttachPermissions:
+    def test_attaches_permissions_when_true(self) -> None:
+        connector = _build_connector()
+        doc = MagicMock(spec=Document)
+        doc.external_access = None
+        expected_access = ExternalAccess(
+            external_user_emails={"student@school.edu"},
+            external_user_group_ids=set(),
+            is_public=False,
+        )
+        with patch.object(connector, "_get_course_permissions", return_value=expected_access):
+            result = connector._maybe_attach_permissions(doc, course_id=1, include_permissions=True)
+
+        assert result.external_access == expected_access
+
+    def test_no_op_when_false(self) -> None:
+        connector = _build_connector()
+        doc = MagicMock(spec=Document)
+        doc.external_access = None
+
+        result = connector._maybe_attach_permissions(doc, course_id=1, include_permissions=False)
+
+        assert result.external_access is None
