@@ -28,6 +28,7 @@ from onyx.connectors.models import ConnectorFailure
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
 from onyx.connectors.models import DocumentFailure
+from onyx.connectors.models import EntityFailure
 from onyx.connectors.models import ImageSection
 from onyx.connectors.models import TextSection
 from onyx.error_handling.exceptions import OnyxError
@@ -47,10 +48,6 @@ def _handle_canvas_api_error(e: OnyxError) -> NoReturn:
     elif e.status_code == 403:
         raise InsufficientPermissionsError(
             "Canvas API token does not have sufficient permissions (HTTP 403)."
-        )
-    elif e.status_code == 429:
-        raise ConnectorValidationError(
-            "Canvas rate-limit exceeded (HTTP 429). Please try again later."
         )
     elif e.status_code >= 500:
         raise UnexpectedValidationError(
@@ -227,6 +224,21 @@ class CanvasConnectorCheckpoint(ConnectorCheckpoint):
         self.current_course_index += 1
         self.stage = CanvasStage.PAGES
         self.next_url = None
+
+    def advance_stage(self) -> None:
+        """Advance past the current stage.
+
+        Moves to the next stage within the same course, or to the next
+        course if the current stage is the last one. Resets next_url so
+        the next call starts fresh on the new stage.
+        """
+        self.next_url = None
+        stages = list(CanvasStage)
+        next_idx = stages.index(self.stage) + 1
+        if next_idx < len(stages):
+            self.stage = stages[next_idx]
+        else:
+            self.advance_course()
 
 
 class CanvasConnector(
@@ -481,7 +493,7 @@ class CanvasConnector(
 
         Returns (docs, early_exit). early_exit is True when pages
         (sorted desc by updated_at) hit an item older than start,
-        signalling that pagination should stop.
+        signaling that pagination should stop.
         """
         results: list[Document | ConnectorFailure] = []
         early_exit = False
@@ -586,20 +598,17 @@ class CanvasConnector(
         """Shared implementation for load_from_checkpoint and load_from_checkpoint_with_perm_sync."""
         new_checkpoint = checkpoint.model_copy(deep=True)
 
-        # First call: materialize the list of course IDs
+        # First call: materialize the list of course IDs.
+        # On failure, let the exception propagate so the framework fails the
+        # attempt cleanly. Swallowing errors here would leave the checkpoint
+        # state unchanged and cause an infinite retry loop.
         if not new_checkpoint.course_ids:
             try:
                 courses = self._list_courses()
             except OnyxError as e:
                 if e.status_code in (401, 403):
-                    _handle_canvas_api_error(e)
-                logger.warning(f"Failed to list Canvas courses: {e}")
-                new_checkpoint.has_more = True
-                return new_checkpoint
-            except Exception as e:
-                logger.warning(f"Failed to list Canvas courses: {e}")
-                new_checkpoint.has_more = True
-                return new_checkpoint
+                    _handle_canvas_api_error(e)  # NoReturn — always raises
+                raise
             new_checkpoint.course_ids = [c.id for c in courses]
             logger.info(
                 f"Found {len(courses)} Canvas courses to process"
@@ -655,17 +664,64 @@ class CanvasConnector(
             if not is_api_error:
                 raise
             if oe.status_code in (401, 403):
-                _handle_canvas_api_error(oe)
-            logger.warning(
-                f"Failed to fetch {stage} for course {course_id}: {oe}"
+                _handle_canvas_api_error(oe)  # NoReturn — always raises
+
+            # 404 means the course itself is gone or inaccessible. The
+            # other stages on this course will hit the same 404, so skip
+            # the whole course rather than burning API calls on each stage.
+            if oe.status_code == 404:
+                logger.warning(
+                    f"Canvas course {course_id} not found while fetching "
+                    f"{stage} (HTTP 404). Skipping course."
+                )
+                yield ConnectorFailure(
+                    failed_entity=EntityFailure(
+                        entity_id=f"canvas-course-{course_id}",
+                    ),
+                    failure_message=(
+                        f"Canvas course {course_id} not found: {oe}"
+                    ),
+                    exception=oe,
+                )
+                new_checkpoint.advance_course()
+            else:
+                logger.warning(
+                    f"Failed to fetch {stage} for course {course_id}: {oe}. "
+                    f"Skipping remainder of this stage."
+                )
+                yield ConnectorFailure(
+                    failed_entity=EntityFailure(
+                        entity_id=f"canvas-{stage}-{course_id}",
+                    ),
+                    failure_message=(
+                        f"Failed to fetch {stage} for course {course_id}: {oe}"
+                    ),
+                    exception=oe,
+                )
+                new_checkpoint.advance_stage()
+            new_checkpoint.has_more = new_checkpoint.current_course_index < len(
+                new_checkpoint.course_ids
             )
-            new_checkpoint.has_more = True
             return new_checkpoint
         except Exception as e:
+            # Unknown error — skip the stage and try to continue.
             logger.warning(
-                f"Failed to fetch {stage} for course {course_id}: {e}"
+                f"Failed to fetch {stage} for course {course_id}: {e}. "
+                f"Skipping remainder of this stage."
             )
-            new_checkpoint.has_more = True
+            yield ConnectorFailure(
+                failed_entity=EntityFailure(
+                    entity_id=f"canvas-{stage}-{course_id}",
+                ),
+                failure_message=(
+                    f"Failed to fetch {stage} for course {course_id}: {e}"
+                ),
+                exception=e,
+            )
+            new_checkpoint.advance_stage()
+            new_checkpoint.has_more = new_checkpoint.current_course_index < len(
+                new_checkpoint.course_ids
+            )
             return new_checkpoint
 
         # Process fetched items
@@ -684,16 +740,8 @@ class CanvasConnector(
         if result_next_url:
             new_checkpoint.next_url = result_next_url
         else:
-            # Stage complete — advance to next stage
-            new_checkpoint.next_url = None
-            stages = list(CanvasStage)
-            # Advance to the next stage (e.g. pages → assignments → announcements),
-            # or to the next course if all stages are done.
-            next_idx = stages.index(stage) + 1
-            if next_idx < len(stages):
-                new_checkpoint.stage = stages[next_idx]
-            else:
-                new_checkpoint.advance_course()
+            # Stage complete — advance to next stage (or next course if last).
+            new_checkpoint.advance_stage()
 
         new_checkpoint.has_more = new_checkpoint.current_course_index < len(
             new_checkpoint.course_ids

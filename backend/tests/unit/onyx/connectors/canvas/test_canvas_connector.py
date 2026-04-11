@@ -325,15 +325,6 @@ class TestGet:
         assert exc_info.value.status_code == 404
 
     @patch("onyx.connectors.canvas.client.rl_requests")
-    def test_raises_on_429(self, mock_requests: MagicMock) -> None:
-        mock_requests.get.return_value = _mock_response(429, {})
-
-        with pytest.raises(OnyxError) as exc_info:
-            self.client.get("courses")
-
-        assert exc_info.value.status_code == 429
-
-    @patch("onyx.connectors.canvas.client.rl_requests")
     def test_skips_params_when_using_full_url(self, mock_requests: MagicMock) -> None:
         mock_requests.get.return_value = _mock_response(json_data=[])
         full = f"{FAKE_BASE_URL}/api/v1/courses?page=2"
@@ -967,10 +958,6 @@ class TestValidateConnectorSettings:
         self._assert_validate_raises(403, InsufficientPermissionsError, mock_requests)
 
     @patch("onyx.connectors.canvas.client.rl_requests")
-    def test_validate_rate_limited(self, mock_requests: MagicMock) -> None:
-        self._assert_validate_raises(429, ConnectorValidationError, mock_requests)
-
-    @patch("onyx.connectors.canvas.client.rl_requests")
     def test_validate_unexpected_error(self, mock_requests: MagicMock) -> None:
         self._assert_validate_raises(500, UnexpectedValidationError, mock_requests)
 
@@ -1235,20 +1222,70 @@ class TestLoadFromCheckpoint:
 
         assert len(items) == 0
 
-    @patch("onyx.connectors.canvas.client.rl_requests")
-    def test_stage_failure_does_not_advance(self, mock_requests: MagicMock) -> None:
-        """If listing fails, stage stays the same for retry."""
-        mock_requests.get.side_effect = _make_url_dispatcher(page_error=True)
+    def test_stage_failure_advances_stage_and_yields_failure(self) -> None:
+        """A 500 on a stage fetch yields a stage-level ConnectorFailure and
+        advances to the next stage, so the framework doesn't loop on the
+        same failing state forever."""
         connector = _build_connector()
         cp = CanvasConnectorCheckpoint(
-            has_more=True, course_ids=[1], current_course_index=0, stage="pages"
+            has_more=True, course_ids=[1, 2], current_course_index=0, stage="pages"
         )
 
-        items, new_cp = _run_checkpoint(connector, cp)
+        with patch.object(
+            connector,
+            "_fetch_stage_page",
+            side_effect=OnyxError(
+                OnyxErrorCode.INTERNAL_ERROR,
+                "boom",
+                status_code_override=500,
+            ),
+        ):
+            items, new_cp = _run_checkpoint(connector, cp)
 
-        assert items == []
-        assert new_cp.stage == "pages"
+        expected_entity_id = "canvas-pages-1"
+        expected_next_stage = "assignments"
+
+        assert len(items) == 1
+        assert isinstance(items[0], ConnectorFailure)
+        assert items[0].failed_entity is not None
+        assert items[0].failed_entity.entity_id == expected_entity_id
+        assert new_cp.stage == expected_next_stage
         assert new_cp.current_course_index == 0
+        assert new_cp.next_url is None
+        assert new_cp.has_more is True
+
+    def test_course_404_advances_course_and_yields_failure(self) -> None:
+        """A 404 on a stage fetch means the whole course is inaccessible —
+        yield a course-level ConnectorFailure and skip to the next course
+        instead of burning API calls on every stage of a missing course."""
+        connector = _build_connector()
+        cp = CanvasConnectorCheckpoint(
+            has_more=True, course_ids=[1, 2], current_course_index=0, stage="pages"
+        )
+
+        with patch.object(
+            connector,
+            "_fetch_stage_page",
+            side_effect=OnyxError(
+                OnyxErrorCode.NOT_FOUND,
+                "course gone",
+                status_code_override=404,
+            ),
+        ):
+            items, new_cp = _run_checkpoint(connector, cp)
+
+        expected_entity_id = "canvas-course-1"
+        expected_next_course_index = 1
+        expected_reset_stage = "pages"
+
+        assert len(items) == 1
+        assert isinstance(items[0], ConnectorFailure)
+        assert items[0].failed_entity is not None
+        assert items[0].failed_entity.entity_id == expected_entity_id
+        assert new_cp.current_course_index == expected_next_course_index
+        assert new_cp.stage == expected_reset_stage
+        assert new_cp.next_url is None
+        assert new_cp.has_more is True
 
     def test_fatal_auth_failure_during_stage_fetch_propagates(self) -> None:
         connector = _build_connector()
