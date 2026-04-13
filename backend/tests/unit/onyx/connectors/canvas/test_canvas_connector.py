@@ -23,6 +23,7 @@ from onyx.connectors.exceptions import UnexpectedValidationError
 from onyx.connectors.models import ConnectorFailure
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 
@@ -153,10 +154,12 @@ def _run_checkpoint(
     checkpoint: CanvasConnectorCheckpoint,
     start: float = 0.0,
     end: float = datetime(2099, 1, 1, tzinfo=timezone.utc).timestamp(),
-) -> tuple[list[Document | ConnectorFailure], CanvasConnectorCheckpoint]:
+) -> tuple[
+    list[Document | HierarchyNode | ConnectorFailure], CanvasConnectorCheckpoint
+]:
     """Run load_from_checkpoint once and collect yielded items + returned checkpoint."""
     gen = connector.load_from_checkpoint(start, end, checkpoint)
-    items: list[Document | ConnectorFailure] = []
+    items: list[Document | HierarchyNode | ConnectorFailure] = []
     new_checkpoint: CanvasConnectorCheckpoint | None = None
     try:
         while True:
@@ -1426,7 +1429,7 @@ class TestLoadFromCheckpointWithPermSync:
         end = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()
 
         gen = connector.load_from_checkpoint_with_perm_sync(start, end, cp)
-        items: list[Document | ConnectorFailure] = []
+        items: list[Document | HierarchyNode | ConnectorFailure] = []
         new_cp: CanvasConnectorCheckpoint | None = None
         try:
             while True:

@@ -231,7 +231,7 @@ class CanvasConnectorCheckpoint(ConnectorCheckpoint):
         the next call starts fresh on the new stage.
         """
         self.next_url = None
-        stages = list(CanvasStage)
+        stages: list[CanvasStage] = list(CanvasStage)
         next_idx = stages.index(self.stage) + 1
         if next_idx < len(stages):
             self.stage = stages[next_idx]
