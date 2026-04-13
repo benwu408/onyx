@@ -98,9 +98,9 @@ def _parse_canvas_dt(timestamp_str: str) -> datetime:
     Canvas returns timestamps with a trailing 'Z' instead of '+00:00',
     so we normalise before parsing.
     """
-    return datetime.fromisoformat(
-        timestamp_str.replace("Z", "+00:00")
-    ).astimezone(timezone.utc)
+    return datetime.fromisoformat(timestamp_str.replace("Z", "+00:00")).astimezone(
+        timezone.utc
+    )
 
 
 def _unix_to_canvas_time(epoch: float) -> str:
@@ -108,9 +108,7 @@ def _unix_to_canvas_time(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _in_time_window(
-    timestamp_str: str, start: float, end: float
-) -> bool:
+def _in_time_window(timestamp_str: str, start: float, end: float) -> bool:
     """Check whether a Canvas ISO-8601 timestamp falls within (start, end]."""
     return start < _parse_canvas_dt(timestamp_str).timestamp() <= end
 
@@ -361,9 +359,7 @@ class CanvasConnector(
         if body_text:
             text_parts.append(body_text)
 
-        doc_updated_at = (
-            _parse_canvas_dt(page.updated_at) if page.updated_at else None
-        )
+        doc_updated_at = _parse_canvas_dt(page.updated_at) if page.updated_at else None
 
         document = self._build_document(
             doc_id=f"canvas-page-{page.course_id}-{page.page_id}",
@@ -391,9 +387,7 @@ class CanvasConnector(
             text_parts.append(f"Due: {due_dt.strftime('%B %d, %Y %H:%M UTC')}")
 
         doc_updated_at = (
-            _parse_canvas_dt(assignment.updated_at)
-            if assignment.updated_at
-            else None
+            _parse_canvas_dt(assignment.updated_at) if assignment.updated_at else None
         )
 
         document = self._build_document(
@@ -419,9 +413,7 @@ class CanvasConnector(
             text_parts.append(msg_text)
 
         doc_updated_at = (
-            _parse_canvas_dt(announcement.posted_at)
-            if announcement.posted_at
-            else None
+            _parse_canvas_dt(announcement.posted_at) if announcement.posted_at else None
         )
 
         document = self._build_document(
@@ -470,9 +462,7 @@ class CanvasConnector(
         if next_url:
             # Resuming mid-pagination: the next_url from Canvas's
             # Link header already contains endpoint + query params.
-            response, result_next_url = self.canvas_client.get(
-                full_url=next_url
-            )
+            response, result_next_url = self.canvas_client.get(full_url=next_url)
         else:
             # First request for this stage: build from endpoint + params.
             response, result_next_url = self.canvas_client.get(
@@ -521,9 +511,7 @@ class CanvasConnector(
                     )
 
                 elif stage == CanvasStage.ASSIGNMENTS:
-                    assignment = CanvasAssignment.from_api(
-                        item, course_id=course_id
-                    )
+                    assignment = CanvasAssignment.from_api(item, course_id=course_id)
                     if not assignment.updated_at or not _in_time_window(
                         assignment.updated_at, start, end
                     ):
@@ -545,9 +533,7 @@ class CanvasConnector(
                             f"course {course_id}: no posted_at"
                         )
                         continue
-                    if not _in_time_window(
-                        announcement.posted_at, start, end
-                    ):
+                    if not _in_time_window(announcement.posted_at, start, end):
                         continue
                     doc = self._convert_announcement_to_document(announcement)
                     results.append(
@@ -610,37 +596,28 @@ class CanvasConnector(
                     _handle_canvas_api_error(e)  # NoReturn — always raises
                 raise
             new_checkpoint.course_ids = [c.id for c in courses]
-            logger.info(
-                f"Found {len(courses)} Canvas courses to process"
-            )
+            logger.info(f"Found {len(courses)} Canvas courses to process")
             new_checkpoint.has_more = len(new_checkpoint.course_ids) > 0
             return new_checkpoint
 
         # All courses done.
-        if new_checkpoint.current_course_index >= len(
-            new_checkpoint.course_ids
-        ):
+        if new_checkpoint.current_course_index >= len(new_checkpoint.course_ids):
             new_checkpoint.has_more = False
             return new_checkpoint
 
-        course_id = new_checkpoint.course_ids[
-            new_checkpoint.current_course_index
-        ]
-        stage = new_checkpoint.stage
-
-        if stage not in CanvasStage:
+        course_id = new_checkpoint.course_ids[new_checkpoint.current_course_index]
+        try:
+            stage = CanvasStage(new_checkpoint.stage)
+        except ValueError as e:
             raise ValueError(
-                f"Invalid checkpoint stage: {stage!r}. "
+                f"Invalid checkpoint stage: {new_checkpoint.stage!r}. "
                 f"Valid stages: {[s.value for s in CanvasStage]}"
-            )
+            ) from e
 
         # Build endpoint + params from the static template.
         config = _STAGE_CONFIG[stage]
         endpoint = config["endpoint"].format(course_id=course_id)
-        params = {
-            k: v.format(course_id=course_id)
-            for k, v in config["params"].items()
-        }
+        params = {k: v.format(course_id=course_id) for k, v in config["params"].items()}
         # Only the announcements API supports server-side date filtering
         # (start_date/end_date). Pages support server-side sorting
         # (sort=updated_at desc) enabling early exit, but not date
@@ -678,9 +655,7 @@ class CanvasConnector(
                     failed_entity=EntityFailure(
                         entity_id=f"canvas-course-{course_id}",
                     ),
-                    failure_message=(
-                        f"Canvas course {course_id} not found: {oe}"
-                    ),
+                    failure_message=(f"Canvas course {course_id} not found: {oe}"),
                     exception=oe,
                 )
                 new_checkpoint.advance_course()
