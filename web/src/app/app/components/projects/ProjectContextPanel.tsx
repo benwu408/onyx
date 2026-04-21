@@ -2,12 +2,11 @@
 
 import React, { useCallback, useState } from "react";
 import { useDropzone } from "react-dropzone";
-import Separator from "@/refresh-components/Separator";
 import { useProjectsContext } from "@/providers/ProjectsContext";
 import FilePickerPopover from "@/refresh-components/popovers/FilePickerPopover";
 import type { ProjectFile } from "../../projects/projectsService";
 import { MinimalOnyxDocument } from "@/lib/search/interfaces";
-import { Button } from "@opal/components";
+import { Button, Divider } from "@opal/components";
 
 import AddInstructionModal from "@/components/modals/AddInstructionModal";
 import UserFilesModal from "@/components/modals/UserFilesModal";
@@ -20,6 +19,7 @@ import IconButton from "@/refresh-components/buttons/IconButton";
 import ButtonRenaming from "@/refresh-components/buttons/ButtonRenaming";
 import { UserFileStatus } from "../../projects/projectsService";
 import { SvgAddLines, SvgEdit, SvgFiles, SvgFolderOpen } from "@opal/icons";
+import { Hoverable } from "@opal/core";
 
 export interface ProjectContextPanelProps {
   projectTokenCount?: number;
@@ -133,37 +133,43 @@ export default function ProjectContextPanel({
       <div className="flex flex-col gap-6 w-full max-w-[var(--app-page-main-content-width)] mx-auto p-4 pt-14 pb-6">
         <div className="flex flex-col gap-1 text-text-04">
           <SvgFolderOpen className="h-8 w-8 text-text-04" />
-          <div className="group flex items-center gap-2">
-            {isEditingName ? (
-              <ButtonRenaming
-                initialName={projectName}
-                onRename={async (newName) => {
-                  if (currentProjectId) {
-                    await renameProject(currentProjectId, newName);
-                  }
-                }}
-                onClose={cancelEditing}
-                className="font-heading-h2 text-text-04"
-              />
-            ) : (
-              <>
-                <Text as="p" headingH2 className="font-heading-h2">
-                  {projectName}
-                </Text>
-                {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
-                <IconButton
-                  icon={SvgEdit}
-                  internal
-                  onClick={startEditing}
-                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
-                  tooltip="Edit project name"
+          <Hoverable.Root group="projectName" width="fit">
+            <div className="flex items-center gap-2">
+              {isEditingName ? (
+                <ButtonRenaming
+                  initialName={projectName}
+                  onRename={async (newName) => {
+                    if (currentProjectId) {
+                      await renameProject(currentProjectId, newName);
+                    }
+                  }}
+                  onClose={cancelEditing}
+                  className="font-heading-h2 text-text-04"
                 />
-              </>
-            )}
-          </div>
+              ) : (
+                <>
+                  <Text as="p" headingH2 className="font-heading-h2">
+                    {projectName}
+                  </Text>
+                  {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
+                  <Hoverable.Item
+                    group="projectName"
+                    variant="opacity-on-hover"
+                  >
+                    <IconButton
+                      icon={SvgEdit}
+                      internal
+                      onClick={startEditing}
+                      tooltip="Edit project name"
+                    />
+                  </Hoverable.Item>
+                </>
+              )}
+            </div>
+          </Hoverable.Root>
         </div>
 
-        <Separator className="py-0" />
+        <Divider paddingPerpendicular="fit" />
         <div className="flex flex-row gap-2 justify-between">
           <div className="min-w-0 flex-1">
             <Text as="p" headingH3 text04>

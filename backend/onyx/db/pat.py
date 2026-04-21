@@ -8,7 +8,6 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 
 from onyx.auth.pat import build_displayable_pat
@@ -42,12 +41,11 @@ async def fetch_user_for_pat(
         select(User)
         .join(PersonalAccessToken, PersonalAccessToken.user_id == User.id)
         .where(PersonalAccessToken.hashed_token == hashed_token)
-        .where(User.is_active)  # type: ignore
+        .where(User.is_active)  # ty: ignore[invalid-argument-type]
         .where(
             (PersonalAccessToken.expires_at.is_(None))
             | (PersonalAccessToken.expires_at > now)
         )
-        .options(selectinload(User.memories))
     )
     if not user:
         return None
@@ -97,7 +95,9 @@ def create_pat(
 
     Raises ValueError if user is inactive or not found.
     """
-    user = db_session.scalar(select(User).where(User.id == user_id))  # type: ignore
+    user = db_session.scalar(
+        select(User).where(User.id == user_id)  # ty: ignore[invalid-argument-type]
+    )
     if not user or not user.is_active:
         raise ValueError("Cannot create PAT for inactive or non-existent user")
 

@@ -1,7 +1,10 @@
-import "@opal/components/tooltip.css";
-
-/* Shared types */
-export type TooltipSide = "top" | "bottom" | "left" | "right";
+/* Tooltip */
+export {
+  Tooltip,
+  type TooltipProps,
+  type TooltipSide,
+  type TooltipAlign,
+} from "@opal/components/tooltip/components";
 
 /* Button */
 export {
@@ -33,6 +36,18 @@ export {
   type LineItemButtonProps,
 } from "@opal/components/buttons/line-item-button/components";
 
+/* SidebarTab */
+export {
+  SidebarTab,
+  type SidebarTabProps,
+} from "@opal/components/buttons/sidebar-tab/components";
+
+/* LinkButton */
+export {
+  LinkButton,
+  type LinkButtonProps,
+} from "@opal/components/buttons/link-button/components";
+
 /* Text */
 export {
   Text,
@@ -47,6 +62,12 @@ export {
   type TagProps,
   type TagColor,
 } from "@opal/components/tag/components";
+
+/* Divider */
+export {
+  Divider,
+  type DividerProps,
+} from "@opal/components/divider/components";
 
 /* Card */
 export {
@@ -67,6 +88,12 @@ export {
   EmptyMessageCard,
   type EmptyMessageCardProps,
 } from "@opal/components/cards/empty-message-card/components";
+
+/* MessageCard */
+export {
+  MessageCard,
+  type MessageCardProps,
+} from "@opal/components/cards/message-card/components";
 
 /* Pagination */
 export {

@@ -4,10 +4,9 @@ import { useState, useEffect } from "react";
 import Modal from "@/refresh-components/Modal";
 import { Button } from "@opal/components";
 import { Input } from "@/components/ui/input";
-import Label from "@/refresh-components/form/Label";
+import { Label } from "@opal/layouts";
 import Text from "@/refresh-components/texts/Text";
 import { SvgAlertCircle, SvgEye, SvgEyeClosed, SvgKey } from "@opal/icons";
-import { Disabled } from "@opal/core";
 interface MCPAuthTemplate {
   headers: Array<{ name: string; value: string }>;
   request_body_params: Array<{ path: string; value: string }>;
@@ -185,7 +184,7 @@ export default function MCPApiKeyModal({
               <div className="space-y-4">
                 {authTemplate!.required_fields.map((field) => (
                   <div key={field} className="space-y-2">
-                    <Label name={field}>
+                    <Label label={field}>
                       <Text>
                         {field
                           .replace(/_/g, " ")
@@ -222,7 +221,7 @@ export default function MCPApiKeyModal({
             ) : (
               // Legacy API key field
               <div className="space-y-2">
-                <Label name="apiKey">
+                <Label label="apiKey">
                   <Text>{credsType}</Text>
                 </Label>
                 <div className="relative">
@@ -251,12 +250,14 @@ export default function MCPApiKeyModal({
             )}
 
             <div className="flex justify-end space-x-2 pt-4">
-              <Disabled disabled={isSubmitting}>
-                <Button prominence="secondary" onClick={handleClose}>
-                  Cancel
-                </Button>
-              </Disabled>
-              <Disabled
+              <Button
+                disabled={isSubmitting}
+                prominence="secondary"
+                onClick={handleClose}
+              >
+                Cancel
+              </Button>
+              <Button
                 disabled={
                   isSubmitting ||
                   (isTemplateMode
@@ -265,15 +266,14 @@ export default function MCPApiKeyModal({
                       )
                     : !apiKey.trim())
                 }
+                type="submit"
               >
-                <Button type="submit">
-                  {isSubmitting
-                    ? "Saving..."
-                    : isAuthenticated
-                      ? `Update ${credsType}`
-                      : `Save ${credsType}`}
-                </Button>
-              </Disabled>
+                {isSubmitting
+                  ? "Saving..."
+                  : isAuthenticated
+                    ? `Update ${credsType}`
+                    : `Save ${credsType}`}
+              </Button>
             </div>
           </form>
         </Modal.Body>

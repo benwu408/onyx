@@ -4,18 +4,17 @@ import React, { useRef, useState } from "react";
 import Modal from "@/refresh-components/Modal";
 import { Callout } from "@/components/ui/callout";
 import Text from "@/refresh-components/texts/Text";
-import Separator from "@/refresh-components/Separator";
+import { Divider } from "@opal/components";
 import Button from "@/refresh-components/buttons/Button";
 import { Label } from "@/components/Field";
 import {
   CloudEmbeddingProvider,
   getFormattedProviderName,
 } from "@/components/embedding/interfaces";
-import {
-  EMBEDDING_PROVIDERS_ADMIN_URL,
-  LLM_PROVIDERS_ADMIN_URL,
-} from "@/lib/llmConfig/constants";
+import { EMBEDDING_PROVIDERS_ADMIN_URL } from "@/lib/llmConfig/constants";
+import { markdown } from "@opal/utils";
 import { mutate } from "swr";
+import { SWR_KEYS } from "@/lib/swr-keys";
 import { testEmbedding } from "@/app/admin/embeddings/pages/utils";
 import { SvgSettings } from "@opal/icons";
 
@@ -102,7 +101,7 @@ export default function ChangeCredentialsModal({
         return;
       }
 
-      mutate(LLM_PROVIDERS_ADMIN_URL);
+      mutate(SWR_KEYS.adminLlmProviders);
       onDeleted();
     } catch (error) {
       setDeletionError(
@@ -174,9 +173,11 @@ export default function ChangeCredentialsModal({
       <Modal.Content>
         <Modal.Header
           icon={SvgSettings}
-          title={`Modify your ${getFormattedProviderName(
-            provider.provider_type
-          )} ${isProxy ? "Configuration" : "key"}`}
+          title={markdown(
+            `Modify your *${getFormattedProviderName(
+              provider.provider_type
+            )}* ${isProxy ? "configuration" : "key"}`
+          )}
           onClose={onCancel}
         />
         <Modal.Body>
@@ -277,7 +278,7 @@ export default function ChangeCredentialsModal({
                   Update Configuration
                 </Button>
 
-                <Separator />
+                <Divider />
               </div>
             </>
           )}

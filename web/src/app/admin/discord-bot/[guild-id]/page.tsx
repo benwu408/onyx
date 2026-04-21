@@ -11,9 +11,7 @@ import * as SettingsLayouts from "@/layouts/settings-layouts";
 import Text from "@/refresh-components/texts/Text";
 import Card from "@/refresh-components/cards/Card";
 import { Callout } from "@/components/ui/callout";
-import Message from "@/refresh-components/messages/Message";
-import { Button } from "@opal/components";
-import { Disabled } from "@opal/core";
+import { Button, MessageCard } from "@opal/components";
 import { SvgServer } from "@opal/icons";
 import InputSelect from "@/refresh-components/inputs/InputSelect";
 import {
@@ -105,16 +103,20 @@ function GuildDetailContent({
                 width="fit"
                 gap={0.5}
               >
-                <Disabled disabled={disabled}>
-                  <Button prominence="secondary" onClick={handleEnableAll}>
-                    Enable All
-                  </Button>
-                </Disabled>
-                <Disabled disabled={disabled}>
-                  <Button prominence="secondary" onClick={handleDisableAll}>
-                    Disable All
-                  </Button>
-                </Disabled>
+                <Button
+                  disabled={disabled}
+                  prominence="secondary"
+                  onClick={handleEnableAll}
+                >
+                  Enable All
+                </Button>
+                <Button
+                  disabled={disabled}
+                  prominence="secondary"
+                  onClick={handleDisableAll}
+                >
+                  Disable All
+                </Button>
               </Section>
             ) : undefined
           }
@@ -335,9 +337,9 @@ export default function Page({ params }: Props) {
         description={registeredText}
         backButton
         rightChildren={
-          <Disabled disabled={isUpdateDisabled}>
-            <Button onClick={handleSaveChanges}>Update Configuration</Button>
-          </Disabled>
+          <Button disabled={isUpdateDisabled} onClick={handleSaveChanges}>
+            Update Configuration
+          </Button>
         }
       />
       <SettingsLayouts.Body>
@@ -399,11 +401,10 @@ export default function Page({ params }: Props) {
               : "opacity-0 translate-y-4 pointer-events-none"
           )}
         >
-          <Message
-            warning
-            text="You have unsaved changes"
+          <MessageCard
+            variant="warning"
+            title="You have unsaved changes"
             description="Click Update to save them."
-            close={false}
           />
         </div>
       </SettingsLayouts.Body>

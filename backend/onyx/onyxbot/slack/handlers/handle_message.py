@@ -3,10 +3,10 @@ import datetime
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from onyx.auth.schemas import UserRole
 from onyx.configs.onyxbot_configs import ONYX_BOT_FEEDBACK_REMINDER
 from onyx.configs.onyxbot_configs import ONYX_BOT_REACT_EMOJI
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
+from onyx.db.enums import AccountType
 from onyx.db.models import SlackChannelConfig
 from onyx.db.user_preferences import activate_user
 from onyx.db.users import add_slack_user_if_not_exists
@@ -63,7 +63,7 @@ def schedule_feedback_reminder(
     try:
         permalink = client.chat_getPermalink(
             channel=details.channel_to_respond,
-            message_ts=details.msg_to_respond,  # type:ignore
+            message_ts=details.msg_to_respond,  # ty: ignore[invalid-argument-type]
         )
     except SlackApiError as e:
         logger.error(f"Unable to generate the feedback reminder permalink: {e}")
@@ -74,18 +74,22 @@ def schedule_feedback_reminder(
 
     try:
         response = client.chat_scheduleMessage(
-            channel=details.sender_id,  # type:ignore
+            channel=details.sender_id,  # ty: ignore[invalid-argument-type]
             post_at=int(future.timestamp()),
             blocks=[
                 get_feedback_reminder_blocks(
-                    thread_link=permalink.data["permalink"],  # type:ignore
+                    thread_link=permalink.data[  # ty: ignore[invalid-argument-type]
+                        "permalink"
+                    ],
                     include_followup=include_followup,
                 )
             ],
             text="",
         )
         logger.info("Scheduled feedback reminder configured")
-        return response.data["scheduled_message_id"]  # type:ignore
+        return response.data[  # ty: ignore[invalid-argument-type]
+            "scheduled_message_id"
+        ]
     except SlackApiError as e:
         logger.error(f"Unable to generate the feedback reminder message: {e}")
         return None
@@ -98,7 +102,7 @@ def remove_scheduled_feedback_reminder(
 
     try:
         client.chat_deleteScheduledMessage(
-            channel=channel,  # type:ignore
+            channel=channel,  # ty: ignore[invalid-argument-type]
             scheduled_message_id=msg_id,
         )
         logger.info("Scheduled feedback reminder deleted")
@@ -247,7 +251,7 @@ def handle_message(
 
             elif (
                 not existing_user.is_active
-                and existing_user.role == UserRole.SLACK_USER
+                and existing_user.account_type == AccountType.BOT
             ):
                 check_seat_fn = fetch_ee_implementation_or_noop(
                     "onyx.db.license",

@@ -264,7 +264,7 @@ monitoring:
       # The sidecar must be configured with label selector: grafana_dashboard=1
       enabled: false
   serviceMonitors:
-    # -- Set to true to deploy ServiceMonitor resources for Celery worker metrics endpoints.
+    # -- Set to true to deploy ServiceMonitor resources for API server and Celery worker metrics endpoints.
     # Requires the Prometheus Operator CRDs (included in kube-prometheus-stack).
     # Use `labels` to match your Prometheus CR's serviceMonitorSelector (e.g. release: onyx-monitoring).
     enabled: false
@@ -284,10 +284,13 @@ serviceAccount:
 nginx:
   enabled: true
   # Nginx proxy timeout settings (in seconds)
+  # These apply to both the internal nginx proxy AND the ingress-nginx annotations.
+  # Must be high enough to cover deep research (30+ min sessions) and LLM TTFT
+  # for large prompts (70K+ tokens). 900s matches the craft/build timeout in production.
   timeouts:
     connect: 300  # Time to establish connection with upstream server
-    send: 300     # Time to send request to upstream server
-    read: 300     # Time to read response from upstream server
+    send: 900     # Time to send request to upstream server
+    read: 900     # Time to read response from upstream server
   controller:
     containerPort:
       http: 1024
@@ -296,7 +299,7 @@ nginx:
     # The ingress-nginx subchart doesn't auto-detect our custom ConfigMap changes.
     # Workaround: Helm upgrade will restart if the following annotation value changes.
     podAnnotations:
-      onyx.app/nginx-config-version: "3"
+      onyx.app/nginx-config-version: "4"
 
     # Propagate DOMAIN into nginx so server_name continues to use the same env var
     extraEnvs:
@@ -503,6 +506,18 @@ api:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+  # Run update-ca-certificates before starting the server.
+  # Useful when mounting custom CA certificates via volumes/volumeMounts.
+  # NOTE: Requires the container to run as root (runAsUser: 0).
+  # CA certificate files must be mounted under /usr/local/share/ca-certificates/
+  # with a .crt extension (e.g. /usr/local/share/ca-certificates/my-ca.crt).
+  # NOTE: Python HTTP clients (requests, httpx) use certifi's bundle by default
+  # and will not pick up the system CA store automatically. Set the following
+  # environment variables via configMap values (loaded through envFrom) to make them use the updated system bundle:
+  #   REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+  #   SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+  runUpdateCaCertificates: false
 
 
 ######################################################################
@@ -1301,3 +1316,26 @@ configMap:
   HARD_DELETE_CHATS: ""
   MAX_ALLOWED_UPLOAD_SIZE_MB: ""
   DEFAULT_USER_FILE_MAX_UPLOAD_SIZE_MB: ""
+
+# -- Additional arbitrary manifests to render as part of the release. Each entry
+# may be either a YAML mapping (a single Kubernetes object) or a multi-line
+# string that will be passed through `tpl` so it can reference release values.
+# Useful for injecting resources not covered by the chart (e.g. NetworkPolicies,
+# ExternalSecrets, custom CRs) without forking the chart.
+extraManifests: []
+# extraManifests:
+#   - apiVersion: v1
+#     kind: ConfigMap
+#     metadata:
+#       name: my-extra-config
+#     data:
+#       key: value
+#   - |
+#     apiVersion: networking.k8s.io/v1
+#     kind: NetworkPolicy
+#     metadata:
+#       name: {{ include "onyx.fullname" . }}-extra
+#     spec:
+#       podSelector: {}
+#       policyTypes:
+#         - Ingress

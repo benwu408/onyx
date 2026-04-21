@@ -27,6 +27,7 @@ export interface Settings {
   query_history_type: QueryHistoryType;
 
   deep_research_enabled?: boolean;
+  multi_model_chat_enabled?: boolean;
   search_ui_enabled?: boolean;
 
   // Image processing settings
@@ -73,6 +74,7 @@ export interface Settings {
   max_allowed_upload_size_mb?: number;
 
   // Factory defaults for the restore button.
+  default_pruning_freq?: number;
   default_user_file_max_upload_size_mb?: number;
   default_file_token_count_threshold_k?: number;
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import { SWR_KEYS } from "@/lib/swr-keys";
 import { useRouter } from "next/navigation";
 import { Route } from "next";
 import { track, AnalyticsEvent } from "@/lib/analytics";
@@ -10,10 +11,9 @@ import Text from "@/refresh-components/texts/Text";
 import LineItem from "@/refresh-components/buttons/LineItem";
 import { SvgSparkle, SvgRefreshCw, SvgX } from "@opal/icons";
 import { IconProps } from "@opal/types";
-import { Button } from "@opal/components";
+import { Button, Divider } from "@opal/components";
 import SimpleLoader from "@/refresh-components/loaders/SimpleLoader";
 import { Section } from "@/layouts/general-layouts";
-import Separator from "@/refresh-components/Separator";
 
 function getNotificationIcon(
   notifType: string
@@ -42,7 +42,7 @@ export default function NotificationsPopover({
     data: notifications,
     mutate,
     isLoading,
-  } = useSWR<Notification[]>("/api/notifications", errorHandlingFetcher);
+  } = useSWR<Notification[]>(SWR_KEYS.notifications, errorHandlingFetcher);
 
   const handleNotificationClick = (notification: Notification) => {
     // Handle build_mode feature announcement specially - show intro animation
@@ -107,7 +107,7 @@ export default function NotificationsPopover({
         <Button icon={SvgX} prominence="tertiary" size="sm" onClick={onClose} />
       </Section>
 
-      <Separator noPadding className="px-2" />
+      <Divider paddingPerpendicular="fit" />
 
       <Section>
         {isLoading ? (

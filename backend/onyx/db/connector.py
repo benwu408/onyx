@@ -1,6 +1,5 @@
 from datetime import datetime
 from datetime import timezone
-from typing import cast
 
 from sqlalchemy import and_
 from sqlalchemy import exists
@@ -242,7 +241,15 @@ def fetch_latest_index_attempts_by_status(
         ),
     )
 
-    return cast(list[IndexAttempt], query.all())
+    return query.all()
+
+
+_INTERNAL_ONLY_SOURCES = {
+    # Used by the ingestion API, not a user-created connector.
+    DocumentSource.INGESTION_API,
+    # Backs the user library / build feature, not a connector users filter by.
+    DocumentSource.CRAFT_FILE,
+}
 
 
 def fetch_unique_document_sources(db_session: Session) -> list[DocumentSource]:
@@ -251,7 +258,7 @@ def fetch_unique_document_sources(db_session: Session) -> list[DocumentSource]:
     sources = [
         source[0]
         for source in distinct_sources
-        if source[0] != DocumentSource.INGESTION_API
+        if source[0] not in _INTERNAL_ONLY_SOURCES
     ]
 
     return sources

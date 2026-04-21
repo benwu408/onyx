@@ -17,6 +17,7 @@ from onyx.configs.app_configs import OPENSEARCH_ADMIN_PASSWORD
 from onyx.configs.app_configs import OPENSEARCH_ADMIN_USERNAME
 from onyx.configs.app_configs import OPENSEARCH_HOST
 from onyx.configs.app_configs import OPENSEARCH_REST_API_PORT
+from onyx.configs.app_configs import OPENSEARCH_USE_SSL
 from onyx.document_index.interfaces_new import TenantState
 from onyx.document_index.opensearch.constants import OpenSearchSearchType
 from onyx.document_index.opensearch.schema import DocumentChunk
@@ -132,7 +133,7 @@ class OpenSearchClient(AbstractContextManager):
         host: str = OPENSEARCH_HOST,
         port: int = OPENSEARCH_REST_API_PORT,
         auth: tuple[str, str] = (OPENSEARCH_ADMIN_USERNAME, OPENSEARCH_ADMIN_PASSWORD),
-        use_ssl: bool = True,
+        use_ssl: bool = OPENSEARCH_USE_SSL,
         verify_certs: bool = False,
         ssl_show_warn: bool = False,
         timeout: int = DEFAULT_OPENSEARCH_CLIENT_TIMEOUT_S,
@@ -302,7 +303,7 @@ class OpenSearchIndexClient(OpenSearchClient):
         host: str = OPENSEARCH_HOST,
         port: int = OPENSEARCH_REST_API_PORT,
         auth: tuple[str, str] = (OPENSEARCH_ADMIN_USERNAME, OPENSEARCH_ADMIN_PASSWORD),
-        use_ssl: bool = True,
+        use_ssl: bool = OPENSEARCH_USE_SSL,
         verify_certs: bool = False,
         ssl_show_warn: bool = False,
         timeout: int = DEFAULT_OPENSEARCH_CLIENT_TIMEOUT_S,
@@ -507,8 +508,82 @@ class OpenSearchIndexClient(OpenSearchClient):
         Raises:
             Exception: There was an error updating the settings of the index.
         """
-        # TODO(andrei): Implement this.
-        raise NotImplementedError
+        logger.debug(f"Updating settings of index {self._index_name} with {settings}.")
+        response = self._client.indices.put_settings(
+            index=self._index_name, body=settings
+        )
+        if not response.get("acknowledged", False):
+            raise RuntimeError(
+                f"Failed to update settings of index {self._index_name}."
+            )
+        logger.debug(f"Settings of index {self._index_name} updated successfully.")
+
+    @log_function_time(print_only=True, debug_only=True)
+    def get_settings(
+        self,
+        include_defaults: bool = False,
+        flat_settings: bool = False,
+        pretty: bool = False,
+        human: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Gets the settings of the index.
+
+        Args:
+            include_defaults: Whether to include default settings which have not
+                been explicitly set. Defaults to False.
+            flat_settings: Whether to return settings in flat format vs nested
+                dictionaries. Defaults to False.
+            pretty: Whether to pretty-format the returned JSON response.
+                Defaults to False.
+            human: Whether to return statistics in human-readable format.
+                Defaults to False.
+
+        Returns:
+            The settings of the index, and optionally the default settings. If
+                include_defaults is False, the default settings will be None.
+
+        Raises:
+            Exception: There was an error getting the settings of the index.
+        """
+        logger.debug(f"Getting settings of index {self._index_name}.")
+        params = {
+            "include_defaults": str(include_defaults).lower(),
+            "flat_settings": str(flat_settings).lower(),
+            "pretty": str(pretty).lower(),
+            "human": str(human).lower(),
+        }
+        response = self._client.indices.get_settings(
+            index=self._index_name, params=params
+        )
+        return response[self._index_name]["settings"], response[self._index_name].get(
+            "defaults", None
+        )
+
+    @log_function_time(print_only=True, debug_only=True)
+    def open_index(self) -> None:
+        """Opens the index.
+
+        Raises:
+            Exception: There was an error opening the index.
+        """
+        logger.debug(f"Opening index {self._index_name}.")
+        response = self._client.indices.open(index=self._index_name)
+        if not response.get("acknowledged", False):
+            raise RuntimeError(f"Failed to open index {self._index_name}.")
+        logger.debug(f"Index {self._index_name} opened successfully.")
+
+    @log_function_time(print_only=True, debug_only=True)
+    def close_index(self) -> None:
+        """Closes the index.
+
+        Raises:
+            Exception: There was an error closing the index.
+        """
+        logger.debug(f"Closing index {self._index_name}.")
+        response = self._client.indices.close(index=self._index_name)
+        if not response.get("acknowledged", False):
+            raise RuntimeError(f"Failed to close index {self._index_name}.")
+        logger.debug(f"Index {self._index_name} closed successfully.")
 
     @log_function_time(
         print_only=True,
@@ -932,7 +1007,7 @@ class OpenSearchIndexClient(OpenSearchClient):
     def search_for_document_ids(
         self,
         body: dict[str, Any],
-        search_type: OpenSearchSearchType = OpenSearchSearchType.DOCUMENT_IDS,
+        search_type: OpenSearchSearchType = OpenSearchSearchType.UNKNOWN,
     ) -> list[str]:
         """Searches the index and returns only document chunk IDs.
 

@@ -500,7 +500,7 @@ def get_document_connector_counts(
         .where(DocumentByConnectorCredentialPair.id.in_(document_ids))
         .group_by(DocumentByConnectorCredentialPair.id)
     )
-    return db_session.execute(stmt).all()  # type: ignore
+    return db_session.execute(stmt).all()  # ty: ignore[invalid-return-type]
 
 
 def get_document_counts_for_cc_pairs(
@@ -572,7 +572,7 @@ def get_document_counts_for_all_cc_pairs(
             DocumentByConnectorCredentialPair.credential_id,
         )
     )
-    return db_session.execute(stmt).all()  # type: ignore
+    return db_session.execute(stmt).all()  # ty: ignore[invalid-return-type]
 
 
 def get_access_info_for_document(
@@ -643,7 +643,7 @@ def get_access_info_for_documents(
         .where(ConnectorCredentialPair.status != ConnectorCredentialPairStatus.DELETING)
         .group_by(DocumentByConnectorCredentialPair.id)
     )
-    return db_session.execute(stmt).all()  # type: ignore
+    return db_session.execute(stmt).all()  # ty: ignore[invalid-return-type]
 
 
 def upsert_documents(
@@ -696,6 +696,7 @@ def upsert_documents(
                         else {}
                     ),
                     doc_metadata=doc.doc_metadata,
+                    file_id=doc.file_id,
                 )
             )
             for doc in seen_documents.values()
@@ -712,6 +713,7 @@ def upsert_documents(
         "secondary_owners": insert_stmt.excluded.secondary_owners,
         "doc_metadata": insert_stmt.excluded.doc_metadata,
         "parent_hierarchy_node_id": insert_stmt.excluded.parent_hierarchy_node_id,
+        "file_id": insert_stmt.excluded.file_id,
     }
     if includes_permissions:
         # Use COALESCE to preserve existing permissions when new values are NULL.
@@ -1371,7 +1373,11 @@ def reset_all_document_kg_stages(db_session: Session) -> int:
 
     # The hasattr check is needed for type checking, even though rowcount
     # is guaranteed to exist at runtime for UPDATE operations
-    return result.rowcount if hasattr(result, "rowcount") else 0
+    return (
+        result.rowcount  # ty: ignore[invalid-return-type]
+        if hasattr(result, "rowcount")
+        else 0
+    )
 
 
 def update_document_kg_stages(
@@ -1394,7 +1400,11 @@ def update_document_kg_stages(
     result = db_session.execute(stmt)
     # The hasattr check is needed for type checking, even though rowcount
     # is guaranteed to exist at runtime for UPDATE operations
-    return result.rowcount if hasattr(result, "rowcount") else 0
+    return (
+        result.rowcount  # ty: ignore[invalid-return-type]
+        if hasattr(result, "rowcount")
+        else 0
+    )
 
 
 def get_skipped_kg_documents(db_session: Session) -> list[str]:

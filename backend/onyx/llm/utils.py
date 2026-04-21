@@ -208,9 +208,9 @@ def litellm_exception_to_error_msg(
             api_error = core_exception.api_error
             if isinstance(api_error, dict):
                 upstream_detail = (
-                    api_error.get("message")
-                    or api_error.get("detail")
-                    or api_error.get("error")
+                    api_error.get("message")  # ty: ignore[invalid-argument-type]
+                    or api_error.get("detail")  # ty: ignore[invalid-argument-type]
+                    or api_error.get("error")  # ty: ignore[invalid-argument-type]
                 )
         if not upstream_detail:
             upstream_detail = str(core_exception)
@@ -743,7 +743,13 @@ def model_is_reasoning_model(model_name: str, model_provider: str) -> bool:
             model_name,
         )
         if model_obj and "supports_reasoning" in model_obj:
-            return model_obj["supports_reasoning"]
+            reasoning = model_obj["supports_reasoning"]
+            if reasoning is None:
+                logger.error(
+                    f"Cannot find reasoning for name={model_name} and provider={model_provider}"
+                )
+                reasoning = False
+            return reasoning
 
         # Fallback: try using litellm.supports_reasoning() for newer models
         try:

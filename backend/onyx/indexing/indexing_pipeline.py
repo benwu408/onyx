@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Protocol
 
+import sentry_sdk
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from sqlalchemy.orm import Session
@@ -29,10 +30,12 @@ from onyx.connectors.models import ImageSection
 from onyx.connectors.models import IndexAttemptMetadata
 from onyx.connectors.models import IndexingDocument
 from onyx.connectors.models import Section
+from onyx.connectors.models import SectionType
 from onyx.connectors.models import TextSection
 from onyx.db.document import get_documents_by_ids
 from onyx.db.document import upsert_document_by_connector_credential_pair
 from onyx.db.document import upsert_documents
+from onyx.db.enums import HookPoint
 from onyx.db.hierarchy import link_hierarchy_nodes_to_documents
 from onyx.db.models import Document as DBDocument
 from onyx.db.models import IndexModelStatus
@@ -47,6 +50,14 @@ from onyx.document_index.interfaces import DocumentMetadata
 from onyx.document_index.interfaces import IndexBatchParams
 from onyx.file_processing.image_summarization import summarize_image_with_error_handling
 from onyx.file_store.file_store import get_default_file_store
+from onyx.file_store.staging import promote_staged_file
+from onyx.hooks.executor import execute_hook
+from onyx.hooks.executor import HookSkipped
+from onyx.hooks.executor import HookSoftFailed
+from onyx.hooks.points.document_ingestion import DocumentIngestionOwner
+from onyx.hooks.points.document_ingestion import DocumentIngestionPayload
+from onyx.hooks.points.document_ingestion import DocumentIngestionResponse
+from onyx.hooks.points.document_ingestion import DocumentIngestionSection
 from onyx.indexing.chunk_batch_store import ChunkBatchStore
 from onyx.indexing.chunker import Chunker
 from onyx.indexing.embedder import embed_chunks_with_failure_handling
@@ -145,6 +156,7 @@ def _upsert_documents_in_db(
             doc_metadata=doc.doc_metadata,
             # parent_hierarchy_node_id is resolved in docfetching using Redis cache
             parent_hierarchy_node_id=doc.parent_hierarchy_node_id,
+            file_id=doc.file_id,
         )
         document_metadata_list.append(db_doc_metadata)
 
@@ -297,6 +309,7 @@ def index_doc_batch_with_handler(
     document_batch: list[Document],
     request_id: str | None,
     tenant_id: str,
+    db_session: Session,
     adapter: IndexingBatchAdapter,
     ignore_time_skip: bool = False,
     enable_contextual_rag: bool = False,
@@ -310,6 +323,7 @@ def index_doc_batch_with_handler(
             document_batch=document_batch,
             request_id=request_id,
             tenant_id=tenant_id,
+            db_session=db_session,
             adapter=adapter,
             ignore_time_skip=ignore_time_skip,
             enable_contextual_rag=enable_contextual_rag,
@@ -322,6 +336,13 @@ def index_doc_batch_with_handler(
     except Exception as e:
         # don't log the batch directly, it's too much text
         document_ids = [doc.id for doc in document_batch]
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("stage", "indexing_pipeline")
+            scope.set_tag("tenant_id", tenant_id)
+            scope.set_tag("batch_size", str(len(document_batch)))
+            scope.set_extra("document_ids", document_ids)
+            scope.fingerprint = ["indexing-pipeline-failure", type(e).__name__]
+            sentry_sdk.capture_exception(e)
         logger.exception(f"Failed to index document batch: {document_ids}")
 
         index_pipeline_result = IndexingPipelineResult(
@@ -346,6 +367,45 @@ def index_doc_batch_with_handler(
     return index_pipeline_result
 
 
+def _promote_new_staged_files(
+    documents: list[Document],
+    previous_file_ids: dict[str, str],
+    db_session: Session,
+) -> None:
+    """Queue STAGING → CONNECTOR origin flips for every new file_id in the batch.
+
+    Intended to run immediately before `_upsert_documents_in_db` so the origin
+    flip lands in the same commit as the `Document.file_id` write. Does not
+    commit — the caller's next commit flushes these UPDATEs.
+    """
+    for doc in documents:
+        new_file_id = doc.file_id
+        if new_file_id is None or new_file_id == previous_file_ids.get(doc.id):
+            continue
+        promote_staged_file(db_session=db_session, file_id=new_file_id)
+
+
+def _delete_replaced_files(
+    documents: list[Document],
+    previous_file_ids: dict[str, str],
+) -> None:
+    """Best-effort blob deletes for file_ids replaced in this batch.
+
+    Must run AFTER `Document.file_id` has been committed to the new
+    file_id.
+    """
+    file_store = get_default_file_store()
+    for doc in documents:
+        new_file_id = doc.file_id
+        old_file_id = previous_file_ids.get(doc.id)
+        if old_file_id is None or old_file_id == new_file_id:
+            continue
+        try:
+            file_store.delete_file(old_file_id, error_on_missing=False)
+        except Exception:
+            logger.exception(f"Failed to delete replaced file_id={old_file_id}.")
+
+
 def index_doc_batch_prepare(
     documents: list[Document],
     index_attempt_metadata: IndexAttemptMetadata,
@@ -364,6 +424,11 @@ def index_doc_batch_prepare(
         document_ids=document_ids,
     )
 
+    # Capture previous file_ids BEFORE any writes so we know what to reap.
+    previous_file_ids: dict[str, str] = {
+        db_doc.id: db_doc.file_id for db_doc in db_docs if db_doc.file_id is not None
+    }
+
     updatable_docs = (
         get_doc_ids_to_update(documents=documents, db_docs=db_docs)
         if not ignore_time_skip
@@ -381,10 +446,23 @@ def index_doc_batch_prepare(
     # for all updatable docs, upsert into the DB
     # Does not include doc_updated_at which is also used to indicate a successful update
     if updatable_docs:
+        # Queue the STAGING → CONNECTOR origin flips BEFORE the Document upsert
+        # so `upsert_documents`' commit flushes Document.file_id and the origin
+        # flip atomically
+        _promote_new_staged_files(
+            documents=updatable_docs,
+            previous_file_ids=previous_file_ids,
+            db_session=db_session,
+        )
         _upsert_documents_in_db(
             documents=updatable_docs,
             index_attempt_metadata=index_attempt_metadata,
             db_session=db_session,
+        )
+        # Blob deletes run only after Document.file_id is durable.
+        _delete_replaced_files(
+            documents=updatable_docs,
+            previous_file_ids=previous_file_ids,
         )
 
     logger.info(
@@ -512,8 +590,15 @@ def process_image_sections(documents: list[Document]) -> list[IndexingDocument]:
     Returns:
         List of IndexingDocument objects with processed_sections as list[Section]
     """
-    # Check if image extraction and analysis is enabled before trying to get a vision LLM
-    if not get_image_extraction_and_analysis_enabled():
+    # Check if image extraction and analysis is enabled before trying to get a vision LLM.
+    # Use section.type rather than isinstance because sections can round-trip
+    # through pydantic as base Section instances (not the concrete subclass).
+    has_image_section = any(
+        section.type == SectionType.IMAGE
+        for document in documents
+        for section in document.sections
+    )
+    if not get_image_extraction_and_analysis_enabled() or not has_image_section:
         llm = None
     else:
         # Only get the vision LLM if image processing is enabled
@@ -532,7 +617,8 @@ def process_image_sections(documents: list[Document]) -> list[IndexingDocument]:
                 **document.model_dump(),
                 processed_sections=[
                     Section(
-                        text=section.text if isinstance(section, TextSection) else "",
+                        type=section.type,
+                        text="" if isinstance(section, ImageSection) else section.text,
                         link=section.link,
                         image_file_id=(
                             section.image_file_id
@@ -556,6 +642,7 @@ def process_image_sections(documents: list[Document]) -> list[IndexingDocument]:
             if isinstance(section, ImageSection):
                 # Default section with image path preserved - ensure text is always a string
                 processed_section = Section(
+                    type=section.type,
                     link=section.link,
                     image_file_id=section.image_file_id,
                     text="",  # Initialize with empty string
@@ -597,8 +684,9 @@ def process_image_sections(documents: list[Document]) -> list[IndexingDocument]:
                 processed_sections.append(processed_section)
 
             # For TextSection, create a base Section with text and link
-            elif isinstance(section, TextSection):
+            else:
                 processed_section = Section(
+                    type=section.type,
                     text=section.text or "",  # Ensure text is always a string, not None
                     link=section.link,
                     image_file_id=None,
@@ -785,6 +873,132 @@ def _verify_indexing_completeness(
         )
 
 
+def _apply_document_ingestion_hook(
+    documents: list[Document],
+    db_session: Session,
+) -> list[Document]:
+    """Apply the Document Ingestion hook to each document in the batch.
+
+    - HookSkipped / HookSoftFailed → document passes through unchanged.
+    - Response with sections=None → document is dropped (logged).
+    - Response with sections → document sections are replaced with the hook's output.
+    """
+
+    def _build_payload(doc: Document) -> DocumentIngestionPayload:
+        return DocumentIngestionPayload(
+            document_id=doc.id or "",
+            title=doc.title,
+            semantic_identifier=doc.semantic_identifier,
+            source=doc.source.value if doc.source is not None else "",
+            sections=[
+                DocumentIngestionSection(
+                    text=s.text if isinstance(s, TextSection) else None,
+                    link=s.link,
+                    image_file_id=(
+                        s.image_file_id if isinstance(s, ImageSection) else None
+                    ),
+                )
+                for s in doc.sections
+            ],
+            metadata={
+                k: v if isinstance(v, list) else [v] for k, v in doc.metadata.items()
+            },
+            doc_updated_at=(
+                doc.doc_updated_at.isoformat() if doc.doc_updated_at else None
+            ),
+            primary_owners=(
+                [
+                    DocumentIngestionOwner(
+                        display_name=o.get_semantic_name() or None,
+                        email=o.email,
+                    )
+                    for o in doc.primary_owners
+                ]
+                if doc.primary_owners
+                else None
+            ),
+            secondary_owners=(
+                [
+                    DocumentIngestionOwner(
+                        display_name=o.get_semantic_name() or None,
+                        email=o.email,
+                    )
+                    for o in doc.secondary_owners
+                ]
+                if doc.secondary_owners
+                else None
+            ),
+        )
+
+    def _apply_result(
+        doc: Document,
+        hook_result: DocumentIngestionResponse | HookSkipped | HookSoftFailed,
+    ) -> Document | None:
+        """Return the modified doc, original doc (skip/soft-fail), or None (drop)."""
+        if isinstance(hook_result, (HookSkipped, HookSoftFailed)):
+            return doc
+        if not hook_result.sections:
+            reason = hook_result.rejection_reason or "Document rejected by hook"
+            logger.info(
+                f"Document ingestion hook dropped document doc_id={doc.id!r}: {reason}"
+            )
+            return None
+        new_sections: list[TextSection | ImageSection] = []
+        for s in hook_result.sections:
+            if s.image_file_id is not None:
+                new_sections.append(
+                    ImageSection(image_file_id=s.image_file_id, link=s.link)
+                )
+            elif s.text is not None:
+                new_sections.append(TextSection(text=s.text, link=s.link))
+            else:
+                logger.warning(
+                    f"Document ingestion hook returned a section with neither text nor "
+                    f"image_file_id for doc_id={doc.id!r} — skipping section."
+                )
+        if not new_sections:
+            logger.info(
+                f"Document ingestion hook produced no valid sections for doc_id={doc.id!r} — dropping document."
+            )
+            return None
+        return doc.model_copy(update={"sections": new_sections})
+
+    if not documents:
+        return documents
+
+    # Run the hook for the first document. If it returns HookSkipped the hook
+    # is not configured — skip the remaining N-1 DB lookups.
+    first_doc = documents[0]
+    first_payload = _build_payload(first_doc).model_dump()
+    first_hook_result = execute_hook(
+        db_session=db_session,
+        hook_point=HookPoint.DOCUMENT_INGESTION,
+        payload=first_payload,
+        response_type=DocumentIngestionResponse,
+    )
+    if isinstance(first_hook_result, HookSkipped):
+        return documents
+
+    result: list[Document] = []
+    first_applied = _apply_result(first_doc, first_hook_result)
+    if first_applied is not None:
+        result.append(first_applied)
+
+    for doc in documents[1:]:
+        payload = _build_payload(doc).model_dump()
+        hook_result = execute_hook(
+            db_session=db_session,
+            hook_point=HookPoint.DOCUMENT_INGESTION,
+            payload=payload,
+            response_type=DocumentIngestionResponse,
+        )
+        applied = _apply_result(doc, hook_result)
+        if applied is not None:
+            result.append(applied)
+
+    return result
+
+
 @log_function_time(debug_only=True)
 def index_doc_batch(
     *,
@@ -794,6 +1008,7 @@ def index_doc_batch(
     document_indices: list[DocumentIndex],
     request_id: str | None,
     tenant_id: str,
+    db_session: Session,
     adapter: IndexingBatchAdapter,
     enable_contextual_rag: bool = False,
     llm: LLM | None = None,
@@ -818,6 +1033,7 @@ def index_doc_batch(
     )
 
     filtered_documents = filter_fnc(document_batch)
+    filtered_documents = _apply_document_ingestion_hook(filtered_documents, db_session)
     context = adapter.prepare(filtered_documents, ignore_time_skip)
     if not context:
         return IndexingPipelineResult.empty(len(filtered_documents))
@@ -1005,6 +1221,7 @@ def run_indexing_pipeline(
         document_batch=document_batch,
         request_id=request_id,
         tenant_id=tenant_id,
+        db_session=db_session,
         adapter=adapter,
         enable_contextual_rag=enable_contextual_rag,
         llm=llm,

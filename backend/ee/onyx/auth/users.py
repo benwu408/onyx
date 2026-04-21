@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from datetime import timezone
 
 import jwt
 from fastapi import Depends
@@ -10,9 +11,10 @@ from fastapi import status
 from ee.onyx.configs.app_configs import SUPER_CLOUD_API_KEY
 from ee.onyx.configs.app_configs import SUPER_USERS
 from ee.onyx.server.seeding import get_seed_config
-from onyx.auth.users import current_admin_user
+from onyx.auth.permissions import require_permission
 from onyx.configs.app_configs import AUTH_TYPE
 from onyx.configs.app_configs import USER_AUTH_SECRET
+from onyx.db.enums import Permission
 from onyx.db.models import User
 from onyx.utils.logger import setup_logger
 
@@ -39,7 +41,7 @@ def get_default_admin_user_emails_() -> list[str]:
 
 async def current_cloud_superuser(
     request: Request,
-    user: User = Depends(current_admin_user),
+    user: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> User:
     api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
     if api_key != SUPER_CLOUD_API_KEY:
@@ -57,7 +59,7 @@ def generate_anonymous_user_jwt_token(tenant_id: str) -> str:
     payload = {
         "tenant_id": tenant_id,
         # Token does not expire
-        "iat": datetime.utcnow(),  # Issued at time
+        "iat": datetime.now(timezone.utc),  # Issued at time
     }
 
     return jwt.encode(payload, USER_AUTH_SECRET, algorithm="HS256")

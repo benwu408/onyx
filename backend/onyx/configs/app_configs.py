@@ -180,6 +180,13 @@ DISPOSABLE_EMAIL_DOMAINS_URL = os.environ.get(
     "https://disposable.github.io/disposable-email-domains/domains.json",
 )
 
+# Captcha cookie TTL — how long a verified captcha token remains valid in
+# the browser cookie before the user has to solve another challenge. Sized
+# to comfortably cover one Google OAuth round-trip (typically <10s) while
+# keeping the replay window tight. 120s also matches Google's own v3 token
+# lifetime, so a paired-up cookie + token never outlive each other.
+CAPTCHA_COOKIE_TTL_SECONDS = int(os.environ.get("CAPTCHA_COOKIE_TTL_SECONDS", "120"))
+
 # OAuth Login Flow
 # Used for both Google OAuth2 and OIDC flows
 OAUTH_CLIENT_ID = (
@@ -282,15 +289,14 @@ OPENSEARCH_ADMIN_USERNAME = os.environ.get("OPENSEARCH_ADMIN_USERNAME", "admin")
 OPENSEARCH_ADMIN_PASSWORD = os.environ.get(
     "OPENSEARCH_ADMIN_PASSWORD", "StrongPassword123!"
 )
+OPENSEARCH_USE_SSL = os.environ.get("OPENSEARCH_USE_SSL", "true").lower() == "true"
 USING_AWS_MANAGED_OPENSEARCH = (
     os.environ.get("USING_AWS_MANAGED_OPENSEARCH", "").lower() == "true"
 )
 # Profiling adds some overhead to OpenSearch operations. This overhead is
-# unknown right now. It is enabled by default so we can get useful logs for
-# investigating slow queries. We may never disable it if the overhead is
-# minimal.
+# unknown right now. Defaults to True.
 OPENSEARCH_PROFILING_DISABLED = (
-    os.environ.get("OPENSEARCH_PROFILING_DISABLED", "").lower() == "true"
+    os.environ.get("OPENSEARCH_PROFILING_DISABLED", "true").lower() == "true"
 )
 # Whether to disable match highlights for OpenSearch. Defaults to True for now
 # as we investigate query performance.
@@ -326,6 +332,10 @@ ENABLE_OPENSEARCH_RETRIEVAL_FOR_ONYX = (
     ENABLE_OPENSEARCH_INDEXING_FOR_ONYX
     and os.environ.get("ENABLE_OPENSEARCH_RETRIEVAL_FOR_ONYX", "").lower() == "true"
 )
+DISABLE_OPENSEARCH_MIGRATION_TASK = (
+    os.environ.get("DISABLE_OPENSEARCH_MIGRATION_TASK", "").lower() == "true"
+)
+ONYX_DISABLE_VESPA = os.environ.get("ONYX_DISABLE_VESPA", "").lower() == "true"
 # Whether we should check for and create an index if necessary every time we
 # instantiate an OpenSearchDocumentIndex on multitenant cloud. Defaults to True.
 VERIFY_CREATE_OPENSEARCH_INDEX_ON_INIT_MT = (
@@ -381,6 +391,14 @@ POSTGRES_HOST = os.environ.get("POSTGRES_HOST") or "127.0.0.1"
 POSTGRES_PORT = os.environ.get("POSTGRES_PORT") or "5432"
 POSTGRES_DB = os.environ.get("POSTGRES_DB") or "postgres"
 AWS_REGION_NAME = os.environ.get("AWS_REGION_NAME") or "us-east-2"
+# Comma-separated replica / multi-host list. If unset, defaults to POSTGRES_HOST
+# only.
+_POSTGRES_HOSTS_STR = os.environ.get("POSTGRES_HOSTS", "").strip()
+POSTGRES_HOSTS: list[str] = (
+    [h.strip() for h in _POSTGRES_HOSTS_STR.split(",") if h.strip()]
+    if _POSTGRES_HOSTS_STR
+    else [POSTGRES_HOST]
+)
 
 POSTGRES_API_SERVER_POOL_SIZE = int(
     os.environ.get("POSTGRES_API_SERVER_POOL_SIZE") or 40
@@ -757,7 +775,7 @@ LEAVE_CONNECTOR_ACTIVE_ON_INITIALIZATION_FAILURE = (
     == "true"
 )
 
-DEFAULT_PRUNING_FREQ = 60 * 60 * 24  # Once a day
+DEFAULT_PRUNING_FREQ = 60 * 60 * 24 * 25  # 25 days
 
 ALLOW_SIMULTANEOUS_PRUNING = (
     os.environ.get("ALLOW_SIMULTANEOUS_PRUNING", "").lower() == "true"
@@ -833,6 +851,38 @@ MAX_DOCUMENT_CHARS = int(os.environ.get("MAX_DOCUMENT_CHARS") or 5_000_000)
 MAX_FILE_SIZE_BYTES = int(
     os.environ.get("MAX_FILE_SIZE_BYTES") or 2 * 1024 * 1024 * 1024
 )  # 2GB in bytes
+
+# Maximum embedded images allowed in a single file. PDFs (and other formats)
+# with thousands of embedded images can OOM the user-file-processing worker
+# because every image is decoded with PIL and then sent to the vision LLM.
+# Enforced both at upload time (rejects the file) and during extraction
+# (defense-in-depth: caps the number of images materialized).
+#
+# Clamped to >= 0; a negative env value would turn upload validation into
+# always-fail and extraction into always-stop, which is never desired. 0
+# disables image extraction entirely, which is a valid (if aggressive) setting.
+MAX_EMBEDDED_IMAGES_PER_FILE = max(
+    0, int(os.environ.get("MAX_EMBEDDED_IMAGES_PER_FILE") or 500)
+)
+
+# Maximum embedded images allowed across all files in a single upload batch.
+# Protects against the scenario where a user uploads many files that each
+# fall under MAX_EMBEDDED_IMAGES_PER_FILE but aggregate to enough work
+# (serial-ish celery fan-out plus per-image vision-LLM calls) to OOM the
+# worker under concurrency or run up surprise latency/cost. Also clamped
+# to >= 0.
+MAX_EMBEDDED_IMAGES_PER_UPLOAD = max(
+    0, int(os.environ.get("MAX_EMBEDDED_IMAGES_PER_UPLOAD") or 1000)
+)
+
+# Maximum non-empty cells to extract from a single xlsx worksheet. Protects
+# from OOM on honestly-huge spreadsheets: memory cost in the extractor is
+# roughly proportional to this count. Once exceeded, the scan stops and a
+# truncation marker row is appended to the sheet's CSV.
+# Peak Memory ~= 100 B * MAX_CELLS
+MAX_XLSX_CELLS_PER_SHEET = max(
+    0, int(os.environ.get("MAX_XLSX_CELLS_PER_SHEET") or 10_000_000)
+)
 
 # Use document summary for contextual rag
 USE_DOCUMENT_SUMMARY = os.environ.get("USE_DOCUMENT_SUMMARY", "true").lower() == "true"
@@ -942,8 +992,19 @@ CUSTOM_ANSWER_VALIDITY_CONDITIONS = json.loads(
 )
 
 VESPA_REQUEST_TIMEOUT = int(os.environ.get("VESPA_REQUEST_TIMEOUT") or "15")
+# This is the timeout for the client side of the Vespa migration task. When
+# exceeded, an exception is raised in our code. This value should be higher than
+# VESPA_MIGRATION_SERVER_SIDE_REQUEST_TIMEOUT.
 VESPA_MIGRATION_REQUEST_TIMEOUT_S = int(
     os.environ.get("VESPA_MIGRATION_REQUEST_TIMEOUT_S") or "120"
+)
+# This is the timeout Vespa uses on the server side to know when to wrap up its
+# traversal and try to report partial results. This differs from the client
+# timeout above which raises an exception in our code when exceeded. This
+# timeout allows Vespa to return gracefully. This value should be lower than
+# VESPA_MIGRATION_REQUEST_TIMEOUT_S. Formatted as <number of seconds>s.
+VESPA_MIGRATION_SERVER_SIDE_REQUEST_TIMEOUT = os.environ.get(
+    "VESPA_MIGRATION_SERVER_SIDE_REQUEST_TIMEOUT", "110s"
 )
 
 SYSTEM_RECURSION_LIMIT = int(os.environ.get("SYSTEM_RECURSION_LIMIT") or "1000")
@@ -1015,6 +1076,12 @@ MANAGED_VESPA = os.environ.get("MANAGED_VESPA", "").lower() == "true"
 
 ENABLE_EMAIL_INVITES = os.environ.get("ENABLE_EMAIL_INVITES", "").lower() == "true"
 
+# When true, GET /users is restricted to callers with READ_USERS so non-admins
+# cannot enumerate the tenant directory. Off by default to preserve sharing UX.
+USER_DIRECTORY_ADMIN_ONLY = (
+    os.environ.get("USER_DIRECTORY_ADMIN_ONLY", "").lower() == "true"
+)
+
 # Limit on number of users a free trial tenant can invite (cloud only)
 NUM_FREE_TRIAL_USER_INVITES = int(os.environ.get("NUM_FREE_TRIAL_USER_INVITES", "10"))
 
@@ -1079,7 +1146,6 @@ POD_NAMESPACE = os.environ.get("POD_NAMESPACE")
 
 DEV_MODE = os.environ.get("DEV_MODE", "").lower() == "true"
 
-HOOK_ENABLED = os.environ.get("HOOK_ENABLED", "").lower() == "true"
 
 INTEGRATION_TESTS_MODE = os.environ.get("INTEGRATION_TESTS_MODE", "").lower() == "true"
 
@@ -1096,6 +1162,11 @@ RECAPTCHA_SECRET_KEY = os.environ.get("RECAPTCHA_SECRET_KEY", "")
 # 0.5 is the recommended default
 RECAPTCHA_SCORE_THRESHOLD = float(os.environ.get("RECAPTCHA_SCORE_THRESHOLD", "0.5"))
 
+# Opt-in per-IP rate limit on /auth/register.
+SIGNUP_RATE_LIMIT_ENABLED = (
+    os.environ.get("SIGNUP_RATE_LIMIT_ENABLED", "").lower() == "true"
+)
+
 MOCK_CONNECTOR_FILE_PATH = os.environ.get("MOCK_CONNECTOR_FILE_PATH")
 
 # Set to true to mock LLM responses for testing purposes
@@ -1108,6 +1179,32 @@ DEFAULT_IMAGE_ANALYSIS_MAX_SIZE_MB = 20
 
 # Number of pre-provisioned tenants to maintain
 TARGET_AVAILABLE_TENANTS = int(os.environ.get("TARGET_AVAILABLE_TENANTS", "5"))
+
+# Master switch for the tenant work-gating feature. Controls the `enabled`
+# axis only — flipping this True puts the feature in shadow mode (compute
+# the gate, log skip counts, but do not actually skip). The `enforce` axis
+# is Redis-only with a hard-coded default of False, so this env flag alone
+# cannot cause real tenants to be skipped. Default off.
+ENABLE_TENANT_WORK_GATING = (
+    os.environ.get("ENABLE_TENANT_WORK_GATING", "").lower() == "true"
+)
+
+# Membership TTL for the `active_tenants` sorted set. Members older than this
+# are treated as inactive by the gate read path. Must be > the full-fanout
+# interval so self-healing re-adds a genuinely-working tenant before their
+# membership expires. Default 30 min.
+TENANT_WORK_GATING_TTL_SECONDS = int(
+    os.environ.get("TENANT_WORK_GATING_TTL_SECONDS", 30 * 60)
+)
+
+# Minimum wall-clock interval between full-fanout cycles. When this many
+# seconds have elapsed since the last bypass, the generator ignores the gate
+# on the next invocation and dispatches to every non-gated tenant, letting
+# consumers re-populate the active set. Schedule-independent so beat drift
+# or backlog can't make the self-heal bursty or sparse. Default 20 min.
+TENANT_WORK_GATING_FULL_FANOUT_INTERVAL_SECONDS = int(
+    os.environ.get("TENANT_WORK_GATING_FULL_FANOUT_INTERVAL_SECONDS", 20 * 60)
+)
 
 
 # Image summarization configuration

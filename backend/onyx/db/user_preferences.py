@@ -9,12 +9,18 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from onyx.auth.schemas import UserRole
+from onyx.db.enums import AccountType
 from onyx.db.enums import DefaultAppMode
 from onyx.db.enums import ThemePreference
 from onyx.db.models import AccessToken
 from onyx.db.models import Assistant__UserSpecificConfig
 from onyx.db.models import Memory
 from onyx.db.models import User
+from onyx.db.models import User__UserGroup
+from onyx.db.models import UserGroup
+from onyx.db.permissions import recompute_user_permissions__no_commit
+from onyx.db.users import assign_user_to_default_groups__no_commit
+from onyx.db.users import is_limited_user
 from onyx.server.manage.models import MemoryItem
 from onyx.server.manage.models import UserSpecificAssistantPreference
 from onyx.utils.logger import setup_logger
@@ -23,13 +29,56 @@ from onyx.utils.logger import setup_logger
 logger = setup_logger()
 
 
+_ROLE_TO_ACCOUNT_TYPE: dict[UserRole, AccountType] = {
+    UserRole.SLACK_USER: AccountType.BOT,
+    UserRole.EXT_PERM_USER: AccountType.EXT_PERM_USER,
+}
+
+
 def update_user_role(
     user: User,
     new_role: UserRole,
     db_session: Session,
 ) -> None:
-    """Update a user's role in the database."""
+    """Update a user's role in the database.
+    Dual-writes account_type to keep it in sync with role and
+    reconciles default-group membership (Admin / Basic)."""
+    old_role = user.role
     user.role = new_role
+    # Note: setting account_type to BOT or EXT_PERM_USER causes
+    # assign_user_to_default_groups__no_commit to early-return, which is
+    # intentional — these account types should not be in default groups.
+    if new_role in _ROLE_TO_ACCOUNT_TYPE:
+        user.account_type = _ROLE_TO_ACCOUNT_TYPE[new_role]
+    elif user.account_type in (AccountType.BOT, AccountType.EXT_PERM_USER):
+        # Upgrading from a non-web-login account type to a web role
+        user.account_type = AccountType.STANDARD
+
+    # Reconcile default-group membership when the role changes.
+    if old_role != new_role:
+        # Remove from all default groups first.
+        db_session.execute(
+            delete(User__UserGroup).where(
+                User__UserGroup.user_id == user.id,
+                User__UserGroup.user_group_id.in_(
+                    select(UserGroup.id).where(UserGroup.is_default.is_(True))
+                ),
+            )
+        )
+
+        # Re-assign to the correct default group.
+        # assign_user_to_default_groups__no_commit internally skips
+        # ANONYMOUS, BOT, and EXT_PERM_USER account types.
+        # Also skip limited users (no group assignment).
+        if not is_limited_user(user):
+            assign_user_to_default_groups__no_commit(
+                db_session,
+                user,
+                is_admin=(new_role == UserRole.ADMIN),
+            )
+
+        recompute_user_permissions__no_commit(user.id, db_session)
+
     db_session.commit()
 
 
@@ -47,8 +96,19 @@ def activate_user(
     user: User,
     db_session: Session,
 ) -> None:
-    """Activate a user by setting is_active to True."""
+    """Activate a user by setting is_active to True.
+
+    Also reconciles default-group membership — the user may have been
+    created while inactive or deactivated before the backfill migration.
+    """
     user.is_active = True
+    # assign_user_to_default_groups__no_commit internally skips
+    # ANONYMOUS, BOT, and EXT_PERM_USER account types.
+    # Also skip limited users (no group assignment).
+    if not is_limited_user(user):
+        assign_user_to_default_groups__no_commit(
+            db_session, user, is_admin=(user.role == UserRole.ADMIN)
+        )
     db_session.add(user)
     db_session.commit()
 
@@ -61,7 +121,7 @@ def get_latest_access_token_for_user(
     try:
         result = db_session.execute(
             select(AccessToken)
-            .where(AccessToken.user_id == user_id)  # type: ignore
+            .where(AccessToken.user_id == user_id)  # ty: ignore[invalid-argument-type]
             .order_by(desc(Column("created_at")))
             .limit(1)
         )
@@ -79,7 +139,7 @@ def update_user_temperature_override_enabled(
     """Update user's temperature override enabled setting."""
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(temperature_override_enabled=temperature_override_enabled)
     )
     db_session.commit()
@@ -93,7 +153,7 @@ def update_user_shortcut_enabled(
     """Update user's shortcut enabled setting."""
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(shortcut_enabled=shortcut_enabled)
     )
     db_session.commit()
@@ -107,7 +167,7 @@ def update_user_auto_scroll(
     """Update user's auto scroll setting."""
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(auto_scroll=auto_scroll)
     )
     db_session.commit()
@@ -121,7 +181,7 @@ def update_user_default_model(
     """Update user's default model setting."""
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(default_model=default_model)
     )
     db_session.commit()
@@ -135,7 +195,7 @@ def update_user_theme_preference(
     """Update user's theme preference setting."""
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(theme_preference=theme_preference)
     )
     db_session.commit()
@@ -149,7 +209,7 @@ def update_user_chat_background(
     """Update user's chat background setting."""
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(chat_background=chat_background)
     )
     db_session.commit()
@@ -163,7 +223,7 @@ def update_user_default_app_mode(
     """Update user's default app mode setting."""
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(default_app_mode=default_app_mode)
     )
     db_session.commit()
@@ -182,7 +242,7 @@ def update_user_personalization(
 ) -> None:
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(
             personal_name=personal_name,
             personal_role=personal_role,
@@ -229,7 +289,9 @@ def get_memories_for_user(
     user_id: UUID,
     db_session: Session,
 ) -> Sequence[Memory]:
-    return db_session.scalars(select(Memory).where(Memory.user_id == user_id)).all()
+    return db_session.scalars(
+        select(Memory).where(Memory.user_id == user_id).order_by(Memory.id.desc())
+    ).all()
 
 
 def update_user_pinned_assistants(
@@ -240,7 +302,7 @@ def update_user_pinned_assistants(
     """Update user's pinned assistants list."""
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(pinned_assistants=pinned_assistants)
     )
     db_session.commit()
@@ -256,7 +318,7 @@ def update_user_assistant_visibility(
     """Update user's assistant visibility settings."""
     db_session.execute(
         update(User)
-        .where(User.id == user_id)  # type: ignore
+        .where(User.id == user_id)  # ty: ignore[invalid-argument-type]
         .values(
             hidden_assistants=hidden_assistants,
             visible_assistants=visible_assistants,

@@ -25,9 +25,9 @@ from pydantic import AnyUrl
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from onyx.auth.permissions import require_permission
 from onyx.auth.schemas import UserRole
 from onyx.auth.users import current_curator_or_admin_user
-from onyx.auth.users import current_user
 from onyx.configs.app_configs import WEB_DOMAIN
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
@@ -35,6 +35,7 @@ from onyx.db.enums import MCPAuthenticationPerformer
 from onyx.db.enums import MCPAuthenticationType
 from onyx.db.enums import MCPServerStatus
 from onyx.db.enums import MCPTransport
+from onyx.db.enums import Permission
 from onyx.db.mcp import create_connection_config
 from onyx.db.mcp import create_mcp_server__no_commit
 from onyx.db.mcp import delete_all_user_connection_configs_for_server_no_commit
@@ -81,6 +82,7 @@ from onyx.tools.tool_implementations.mcp.mcp_client import discover_mcp_tools
 from onyx.tools.tool_implementations.mcp.mcp_client import initialize_mcp_client
 from onyx.tools.tool_implementations.mcp.mcp_client import log_exception_group
 from onyx.utils.encryption import mask_string
+from onyx.utils.encryption import reject_masked_credentials
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -93,6 +95,67 @@ def _truncate_description(description: str | None, max_length: int = 500) -> str
     if len(description) <= max_length:
         return description
     return description[: max_length - 3] + "..."
+
+
+def _resolve_oauth_credentials(
+    *,
+    request_client_id: str | None,
+    request_client_id_changed: bool,
+    request_client_secret: str | None,
+    request_client_secret_changed: bool,
+    existing_client: OAuthClientInformationFull | None,
+) -> tuple[str | None, str | None]:
+    """Pick the effective client_id / client_secret for an upsert/connect.
+
+    Mirrors the LLM-provider `api_key_changed` pattern: when the frontend
+    flags a field as unchanged, ignore whatever value it sent (it is most
+    likely a masked placeholder) and reuse the stored value. When the
+    frontend flags a field as changed, take the request value as-is, but
+    defensively reject masked placeholders so a buggy client can't write
+    a mask to the database.
+    """
+    resolved_id = request_client_id
+    if not request_client_id_changed:
+        resolved_id = existing_client.client_id if existing_client else None
+    elif resolved_id:
+        reject_masked_credentials({"oauth_client_id": resolved_id})
+
+    resolved_secret = request_client_secret
+    if not request_client_secret_changed:
+        resolved_secret = existing_client.client_secret if existing_client else None
+    elif resolved_secret:
+        reject_masked_credentials({"oauth_client_secret": resolved_secret})
+
+    return resolved_id, resolved_secret
+
+
+def _build_oauth_admin_config_data(
+    *,
+    client_id: str | None,
+    client_secret: str | None,
+) -> MCPConnectionData:
+    """Construct the admin connection config payload for an OAuth client.
+
+    A public client legitimately has no `client_secret`, so we only require
+    a `client_id` to seed `client_info`. When no client_id is available we
+    fall through to an empty config (the OAuth provider will rely on
+    Dynamic Client Registration to obtain credentials).
+    """
+    config_data = MCPConnectionData(headers={})
+    if not client_id:
+        return config_data
+    token_endpoint_auth_method = "client_secret_post" if client_secret else "none"
+    client_info = OAuthClientInformationFull(
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uris=[AnyUrl(f"{WEB_DOMAIN}/mcp/oauth/callback")],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        scope=REQUESTED_SCOPE,  # TODO(evan): allow specifying scopes?
+        token_endpoint_auth_method=token_endpoint_auth_method,
+    )
+    config_data[MCPOAuthKeys.CLIENT_INFO.value] = client_info.model_dump(mode="json")
+    return config_data
 
 
 router = APIRouter(prefix="/mcp")
@@ -191,7 +254,9 @@ class OnyxTokenStorage(TokenStorage):
                         )
             return None
 
-    async def set_client_info(self, info: OAuthClientInformationFull) -> None:
+    async def set_client_info(  # ty: ignore[invalid-method-override]
+        self, info: OAuthClientInformationFull
+    ) -> None:
         with get_session_with_current_tenant() as db_session:
             config = self._ensure_connection_config(db_session)
             config_data = extract_connection_data(config)
@@ -360,7 +425,7 @@ async def connect_admin_oauth(
 async def connect_user_oauth(
     request: MCPUserOAuthConnectRequest,
     db: Session = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> MCPUserOAuthConnectResponse:
     return await _connect_oauth(request, db, is_admin=False, user=user)
 
@@ -391,22 +456,32 @@ async def _connect_oauth(
             detail=f"Server was configured with authentication type {auth_type_str}",
         )
 
-    # Create admin config with client info if provided
-    config_data = MCPConnectionData(headers={})
-    if request.oauth_client_id and request.oauth_client_secret:
-        client_info = OAuthClientInformationFull(
-            client_id=request.oauth_client_id,
-            client_secret=request.oauth_client_secret,
-            redirect_uris=[AnyUrl(f"{WEB_DOMAIN}/mcp/oauth/callback")],
-            grant_types=["authorization_code", "refresh_token"],
-            response_types=["code"],
-            scope=REQUESTED_SCOPE,  # TODO: allow specifying scopes?
-            # Must specify auth method so client_secret is actually sent during token exchange
-            token_endpoint_auth_method="client_secret_post",
+    # Resolve the effective OAuth credentials, falling back to the stored
+    # values for any field the frontend marked as unchanged. This protects
+    # against the resubmit case where the form replays masked placeholders.
+    existing_client: OAuthClientInformationFull | None = None
+    if mcp_server.admin_connection_config:
+        existing_data = extract_connection_data(
+            mcp_server.admin_connection_config, apply_mask=False
         )
-        config_data[MCPOAuthKeys.CLIENT_INFO.value] = client_info.model_dump(
-            mode="json"
-        )
+        existing_client_raw = existing_data.get(MCPOAuthKeys.CLIENT_INFO.value)
+        if existing_client_raw:
+            existing_client = OAuthClientInformationFull.model_validate(
+                existing_client_raw
+            )
+
+    request.oauth_client_id, request.oauth_client_secret = _resolve_oauth_credentials(
+        request_client_id=request.oauth_client_id,
+        request_client_id_changed=request.oauth_client_id_changed,
+        request_client_secret=request.oauth_client_secret,
+        request_client_secret_changed=request.oauth_client_secret_changed,
+        existing_client=existing_client,
+    )
+
+    config_data = _build_oauth_admin_config_data(
+        client_id=request.oauth_client_id,
+        client_secret=request.oauth_client_secret,
+    )
 
     if mcp_server.admin_connection_config_id is None:
         if not is_admin:
@@ -572,7 +647,7 @@ async def _connect_oauth(
 async def process_oauth_callback(
     request: Request,
     db_session: Session = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> MCPOAuthCallbackResponse:
     """Complete OAuth flow by exchanging code for tokens and storing them.
 
@@ -655,7 +730,7 @@ async def process_oauth_callback(
 def save_user_credentials(
     request: MCPUserCredentialsRequest,
     db_session: Session = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> MCPApiKeyResponse:
     """Save user credentials for template-based MCP server authentication"""
 
@@ -983,7 +1058,7 @@ def _db_mcp_server_to_api_mcp_server(
 def get_mcp_servers_for_assistant(
     assistant_id: str,
     db: Session = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> MCPServersResponse:
     """Get MCP servers for an assistant"""
 
@@ -1011,7 +1086,7 @@ def get_mcp_servers_for_assistant(
 @router.get("/servers", response_model=MCPServersResponse)
 def get_mcp_servers_for_user(
     db: Session = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> MCPServersResponse:
     """List all MCP servers for use in agent configuration and chat UI.
 
@@ -1140,7 +1215,7 @@ def get_mcp_server_tools_snapshots(
 def user_list_mcp_tools_by_id(
     server_id: int,
     db: Session = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> MCPToolListResponse:
     return _list_mcp_tools_by_id(server_id, db, False, user)
 
@@ -1354,6 +1429,22 @@ def _upsert_mcp_server(
             )
             if client_info_raw:
                 client_info = OAuthClientInformationFull.model_validate(client_info_raw)
+
+        # Resolve the effective OAuth credentials, falling back to the stored
+        # values for any field the frontend marked as unchanged. This protects
+        # the change-detection comparison below from spurious diffs caused by
+        # masked placeholders being replayed.
+        if client_info and request.auth_type == MCPAuthenticationType.OAUTH:
+            (
+                request.oauth_client_id,
+                request.oauth_client_secret,
+            ) = _resolve_oauth_credentials(
+                request_client_id=request.oauth_client_id,
+                request_client_id_changed=request.oauth_client_id_changed,
+                request_client_secret=request.oauth_client_secret,
+                request_client_secret_changed=request.oauth_client_secret_changed,
+                existing_client=client_info,
+            )
 
         changing_connection_config = (
             not mcp_server.admin_connection_config

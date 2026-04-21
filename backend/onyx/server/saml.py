@@ -13,7 +13,7 @@ from fastapi import Response
 from fastapi import status
 from fastapi_users import exceptions
 from fastapi_users.authentication import Strategy
-from onelogin.saml2.auth import OneLogin_Saml2_Auth  # type: ignore
+from onelogin.saml2.auth import OneLogin_Saml2_Auth
 from pydantic import BaseModel
 
 from onyx.auth.schemas import UserCreate
@@ -70,7 +70,7 @@ async def upsert_saml_user(email: str) -> User:
                 try:
                     user = await user_manager.get_by_email(email)
                     # If user has a non-authenticated role, treat as non-existent
-                    if not user.role.is_web_login():
+                    if not user.account_type.is_web_login():
                         raise exceptions.UserNotExists()
                     return user
                 except exceptions.UserNotExists:
